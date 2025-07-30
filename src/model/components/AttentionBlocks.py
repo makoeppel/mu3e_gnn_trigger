@@ -311,106 +311,118 @@ class PoolingAttentionBlock(layers.Layer):
         })
         return config
 
-
-class PointTransformerBlock(layers.Layer):
-    def __init__(self, hidden_dim=64, **kwargs):
-        super().__init__(**kwargs)
-        self.hidden_dim = hidden_dim
-
-        # MLPs
-        self.rel_pos_mlp = keras.Sequential([
-            layers.Dense(hidden_dim, activation='relu'),
-            layers.Dense(hidden_dim)
-        ])
-
-        self.attn_mlp = keras.Sequential([
-            layers.Dense(hidden_dim, activation='relu'),
-            layers.Dense(hidden_dim)
-        ])
-
-        self.output_mlp = keras.Sequential([
-            layers.Dense(hidden_dim, activation='relu'),
-            layers.Dense(hidden_dim)
-        ])
-
-        self.query_mlp = keras.Sequential([
-            layers.Dense(hidden_dim, activation='relu'),
-            layers.Dense(hidden_dim)
-        ])
-
-        self.key_mlp = keras.Sequential([
-            layers.Dense(hidden_dim, activation='relu'),
-            layers.Dense(hidden_dim)
-        ])
-    
-        self.value_mlp = keras.Sequential([
-            layers.Dense(hidden_dim, activation='relu'),
-            layers.Dense(hidden_dim)
-        ])
+from . import MLP
+class PointTransformer(layers.Layer):
+    def __init__(self, key_dim, mlp_depth = 2, dropout_rate = 0, **kwargs):
+        super(PointTransformer, self).__init__(**kwargs)
+        self.key_dim = key_dim
+        self.phi = MLP(
+            key_dim,
+            num_layers=mlp_depth,
+            dropout_rate=dropout_rate,
+            name="phi_mlp",
+            hidden_activation="relu",
+            activation="linear"
+        )
+        self.psi = MLP(
+            key_dim,
+            num_layers=mlp_depth,
+            dropout_rate=dropout_rate,
+            name="psi_mlp",
+            hidden_activation="relu",
+            activation="linear"
+        )
+        self.pos_encoder = MLP(
+            key_dim,
+            num_layers=mlp_depth,
+            dropout_rate=dropout_rate,
+            name="pos_encoder_mlp",
+            hidden_activation="relu",
+            activation="linear"
+        )
+        self.alpha = MLP(
+            key_dim,
+            num_layers=mlp_depth,
+            dropout_rate=dropout_rate,
+            name="alpha_mlp",
+            hidden_activation="relu",
+            activation="linear"
+        )
+        self.theta = MLP(
+            key_dim,
+            num_layers=mlp_depth,
+            dropout_rate=dropout_rate,
+            name="theta_mlp",
+            hidden_activation="relu",
+            activation="linear"
+        )
+        self.gamma = MLP(
+            key_dim,
+            num_layers=mlp_depth,
+            dropout_rate=dropout_rate,
+            name="gamma_mlp",
+            hidden_activation="relu",
+            activation="linear"
+        )
 
     def build(self, input_shape):
-        super().build(input_shape)
+        super(PointTransformer, self).build(input_shape)
         # Ensure the layer is built with the correct input shape
         if isinstance(input_shape, list):
             input_shape = input_shape[0]
         self.input_spec = layers.InputSpec(shape=input_shape)
-    
+
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], self.hidden_dim)
-
-    def call(self, coords, mask=None):
-        """
-        coords: (B, N, 3) — input coordinates
-        mask:   (B, N)    — boolean mask where True = valid point, False = padded
-        returns: (B, N, hidden_dim)
-        """
-        B = tf.shape(coords)[0]
-        N = tf.shape(coords)[1]
-
-        # Pairwise relative positions
-        coord_i = tf.expand_dims(coords, 2)  # (B, N, 1, 3)
-        coord_j = tf.expand_dims(coords, 1)  # (B, 1, N, 3)
-        rel_pos = coord_i - coord_j          # (B, N, N, 3)
-
-        # Positional encoding
-        pos_enc = self.rel_pos_mlp(rel_pos)      # (B, N, N, hidden_dim)
-
-        # Self-attention
-        q = tf.expand_dims(self.query_mlp(coords), 2)      # (B, N, 1, hidden_dim)
-        k = tf.expand_dims(self.key_mlp(coords), 1)      # (B, 1, N, hidden_dim)
-        attn_input = q - k + pos_enc         # (B, N, N, hidden_dim)
-        attn_logits = self.attn_mlp(attn_input)  # (B, N, N, hidden_dim)
-
-        if mask is not None:
-            # Expand and broadcast mask for attention
-            mask_j = tf.expand_dims(tf.cast(mask, tf.bool), 1)     # (B, 1, N)
-            large_neg = -1e9
-            attn_logits = tf.where(mask_j[..., tf.newaxis],
-                                   attn_logits,
-                                   large_neg * tf.ones_like(attn_logits))
-
-        attn_weights = tf.nn.softmax(attn_logits, axis=2)  # (B, N, N, hidden_dim)
-
-        # Values: features + positional encoding
-        v = tf.expand_dims(self.value_mlp(coords), 1) + pos_enc  # (B, N, N, hidden_dim)
-
-        # Weighted sum
-        out = tf.reduce_sum(attn_weights * v, axis=2)  # (B, N, hidden_dim)
-
-        out = self.output_mlp(out)
-
-        # Optionally zero-out padded outputs
-        if mask is not None:
-            out *= tf.cast(mask[..., tf.newaxis], out.dtype)
-
-        return out
-
+        return (input_shape[0], input_shape[1], self.key_dim)
+    
     def count_params(self):
         return (
-            self.rel_pos_mlp.count_params()
-            + self.attn_mlp.count_params()
-            + self.output_mlp.count_params()
-            + self.query_mlp.count_params()
-            + self.key_mlp.count_params()
-            + self.value_mlp.count_params()
+            self.phi.count_params()
+            + self.psi.count_params()
+            + self.pos_encoder.count_params()
+            + self.alpha.count_params()
+            + self.theta.count_params()
+            + self.gamma.count_params()
         )
+
+    @tf.function
+    def call(self, inputs, mask=None):
+        # inputs: (batch_size, num_points, key_dim)
+        batch_size = tf.shape(inputs)[0]
+        num_points = tf.shape(inputs)[1]
+
+        phi_x = self.phi(inputs)     # (batch, N, D)
+        psi_x = self.psi(inputs)     # (batch, N, D)
+        alpha_x = self.alpha(inputs) # (batch, N, D)
+
+        # Pairwise differences
+        phi_exp = tf.expand_dims(phi_x, axis=1)  # (batch, 1, N, D)
+        psi_exp = tf.expand_dims(psi_x, axis=2)  # (batch, N, 1, D)
+        feature_diff = phi_exp - psi_exp         # (batch, N, N, D)
+
+        pos_enc = self.theta(feature_diff)       # (batch, N, N, D)
+        attn_logits = self.gamma(feature_diff + pos_enc)  # (batch, N, N, D)
+
+        # === Masking ===
+        if mask is not None:
+            # mask: (batch, num_points)
+            mask = tf.cast(mask, dtype=tf.float32)                       # (B, N)
+            mask_row = tf.expand_dims(mask, axis=1)                      # (B, 1, N)
+            mask_col = tf.expand_dims(mask, axis=2)                      # (B, N, 1)
+            pair_mask = mask_row * mask_col                              # (B, N, N)
+            pair_mask = tf.expand_dims(pair_mask, axis=-1)              # (B, N, N, 1)
+            attn_logits += (1.0 - pair_mask) * -1e9  # set logits of masked pairs to large negative
+
+        # Vector-wise softmax: softmax over axis=2 (neighbor dim), for each feature channel
+        attn_weights = tf.nn.softmax(attn_logits, axis=2)  # (batch, N, N, D)
+
+        # Attention-weighted sum
+        alpha_exp = tf.expand_dims(alpha_x, axis=1)  # (batch, 1, N, D)
+        aggregated = attn_weights * (alpha_exp + pos_enc)  # (batch, N, N, D)
+        output = tf.reduce_sum(aggregated, axis=2)          # (batch, N, D)
+
+        return output
+
+    def compute_mask(self, inputs, mask=None):
+        # propagate the input mask to the output
+        return mask

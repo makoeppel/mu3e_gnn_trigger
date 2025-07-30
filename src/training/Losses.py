@@ -12,6 +12,7 @@ class MMDLoss(keras.losses.Loss):
         sigma (float): Bandwidth for the RBF kernel.
         weight (float): Weight for the loss.
     """
+
     def __init__(self, latent_dim, kernel="rbf", sigma=1.0, weight=1.0, **kwargs):
         """
         Args:
@@ -58,11 +59,12 @@ class SWDLoss(tf.keras.losses.Loss):
         num_projections (int): Number of random projections to use.
         name (str): Name of the loss function.
     """
+
     def __init__(self, reg_weight=1.0, num_projections=50, name="swd_loss"):
-        """ Args:
-            reg_weight (float): Regularization weight for the SWD loss.
-            num_projections (int): Number of random projections to use.
-            name (str): Name of the loss function.
+        """Args:
+        reg_weight (float): Regularization weight for the SWD loss.
+        num_projections (int): Number of random projections to use.
+        name (str): Name of the loss function.
         """
         super().__init__(name=name)
         self.reg_weight = reg_weight
@@ -97,10 +99,11 @@ class UnitHyperSphereCoverLoss(keras.losses.Loss):
         latent_dim (int): Dimension of the latent space.
         temperature (float): Temperature parameter for scaling the distances.
     """
+
     def __init__(self, latent_dim, temperature, **kwargs):
-        """ Args:
-            latent_dim (int): Dimension of the latent space.
-            temperature (float): Temperature parameter for scaling the distances.
+        """Args:
+        latent_dim (int): Dimension of the latent space.
+        temperature (float): Temperature parameter for scaling the distances.
         """
         super().__init__(**kwargs)
         self.latent_dim = latent_dim
@@ -135,6 +138,7 @@ class CovarianceLoss(keras.losses.Loss):
     Args:
         **kwargs: Additional keyword arguments for the base class.
     """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -162,6 +166,7 @@ class VarianceLoss(keras.losses.Loss):
         target_std (float): Target standard deviation for the latent vectors.
         **kwargs: Additional keyword arguments for the base class.
     """
+
     def __init__(self, target_std, **kwargs):
         super().__init__(**kwargs)
         self.target_std = target_std
@@ -169,7 +174,9 @@ class VarianceLoss(keras.losses.Loss):
     def call(self, _, y_pred):
         z = y_pred  # shape: (batch_size, latent_dim)
         return tf.reduce_mean(
-            tf.maximum(0.0, self.target_std - tf.sqrt(tf.math.reduce_variance(z, axis=0) + 1e-4))
+            tf.nn.relu(
+                self.target_std - tf.sqrt(tf.math.reduce_variance(z, axis=0) + 1e-8)
+            )
         )
 
 
@@ -183,6 +190,7 @@ class ContrastiveLoss(keras.losses.Loss):
         cov_mtpl (float): Multiplier for the covariance loss.
         **kwargs: Additional keyword arguments for the base class.
     """
+
     def __init__(self, contrastive_views=4, var_mtpl=1, cov_mtpl=1, **kwargs):
         super().__init__(**kwargs)
         self.contrastive_views = contrastive_views
@@ -205,3 +213,23 @@ class ContrastiveLoss(keras.losses.Loss):
             loss += self.cov_mtpl * self.cov_loss(outputs[i], outputs[i])
             loss += self.swd_loss(outputs[i], outputs[i])
         return loss
+
+
+class VarianceCovarianceLoss(keras.losses.Loss):
+    """Loss function to encourage low variance and covariance among latent vectors.
+    This loss computes the variance and covariance of the latent vectors and penalizes
+    them, encouraging the variance to be close to 1 and covariance to be close to 0.
+    Args:
+        target_std (float): Target standard deviation for the latent vectors.
+        **kwargs: Additional keyword arguments for the base class.
+    """
+
+    def __init__(self, target_std=1.0, cov_penalty=1, **kwargs):
+        super().__init__(**kwargs)
+        self.target_std = target_std
+        self.var_loss = VarianceLoss(target_std)
+        self.cov_loss = CovarianceLoss()
+        self.cov_penalty = cov_penalty
+
+    def call(self, _, y_pred):
+        return self.var_loss(_, y_pred)  + self.cov_penalty * self.cov_loss(_, y_pred)
