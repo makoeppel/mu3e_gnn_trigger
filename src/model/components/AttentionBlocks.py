@@ -1,6 +1,7 @@
 import keras
 import tensorflow as tf
 from keras import layers
+from . import MLP
 
 
 class SelfAttentionBlock(layers.Layer):
@@ -9,13 +10,16 @@ class SelfAttentionBlock(layers.Layer):
         num_heads,
         key_dim,
         dropout_rate=0.0,
+        ff_dim=None,
         name="self_attention_block",
-        **kwargs
+        **kwargs,
     ):
         super(SelfAttentionBlock, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.key_dim = key_dim
         self.name = name
+        if ff_dim is None:
+            ff_dim = key_dim * 2
 
         self.attention = layers.MultiHeadAttention(
             num_heads=num_heads, key_dim=key_dim, name="self_attention_layer"
@@ -23,15 +27,21 @@ class SelfAttentionBlock(layers.Layer):
         self.dropout1 = layers.Dropout(dropout_rate, name="dropout_1")
         self.layer_norm_1 = layers.LayerNormalization(name="layer_norm_1")
 
-        self.ff_layer = layers.Dense(key_dim, activation="relu", name="ffn_layer")
+        self.ff_layer = keras.Sequential(
+            [
+                layers.Dense(ff_dim, activation="relu", name="ffn_dense_1"),
+                layers.Dense(key_dim, name="ffn_dense_2"),
+            ],
+            name="ffn_layer",
+        )
 
         self.dropout2 = layers.Dropout(dropout_rate)
         self.layer_norm_2 = layers.LayerNormalization(name="layer_norm_2")
 
     def call(self, inputs, mask=None, training=None):
-        if mask is not None:
-            mask = tf.expand_dims(mask, axis=-1)
-        attention_output = self.attention(inputs, inputs, attention_mask=mask)
+        attention_output = self.attention(
+            inputs, inputs, query_mask=mask, key_mask=mask
+        )
         attention_output = self.dropout1(attention_output, training=training)
         attention_output = inputs + attention_output
         attention_output = self.layer_norm_1(attention_output)
@@ -82,13 +92,19 @@ class SelfAttentionBlock(layers.Layer):
 
 
 class SelfAttentionStack(layers.Layer):
-    def __init__(self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, **kwargs):
+    def __init__(
+        self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, ff_dim=None, **kwargs
+    ):
         super(SelfAttentionStack, self).__init__(**kwargs)
         self.attention_blocks = [
             SelfAttentionBlock(
-                num_heads=num_heads, key_dim=key_dim, dropout_rate=dropout_rate
+                num_heads=num_heads,
+                key_dim=key_dim,
+                dropout_rate=dropout_rate,
+                ff_dim=ff_dim,
+                name=f"attention_block_{i+1}",
             )
-            for _ in range(stack_size)  # Example: 2 attention blocks
+            for i in range(stack_size)  # Example: 2 attention blocks
         ]
 
     def call(self, inputs, mask=None, training=None):
@@ -126,10 +142,12 @@ class SelfAttentionStack(layers.Layer):
 
 
 class MultiHeadAttentionBlock(layers.Layer):
-    def __init__(self, num_heads, key_dim, dropout_rate=0.0, **kwargs):
+    def __init__(self, num_heads, key_dim, dropout_rate=0.0, ff_dim=None, **kwargs):
         super(MultiHeadAttentionBlock, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.key_dim = key_dim
+        if ff_dim is None:
+            ff_dim = key_dim * 2
 
         self.attention = layers.MultiHeadAttention(
             num_heads=num_heads, key_dim=key_dim, name="multi_head_attention_layer"
@@ -138,7 +156,13 @@ class MultiHeadAttentionBlock(layers.Layer):
         self.layer_norm = layers.LayerNormalization(
             name="multi_head_attention_layer_norm"
         )
-        self.ff_layer = layers.Dense(key_dim, activation="relu", name="ffn_layer")
+        self.ff_layer = keras.Sequential(
+            [
+                layers.Dense(ff_dim, activation="relu", name="ffn_dense_1"),
+                layers.Dense(key_dim, name="ffn_dense_2"),
+            ],
+            name="ffn_layer",
+        )
         self.ff_dropout = layers.Dropout(dropout_rate, name="ffn_dropout")
         self.ff_layer_norm = layers.LayerNormalization(name="ffn_layer_norm")
 
@@ -146,15 +170,17 @@ class MultiHeadAttentionBlock(layers.Layer):
         super(MultiHeadAttentionBlock, self).build(input_shape)
         # Ensure the layer is built with the correct input shape
         if isinstance(input_shape, list):
-            input_shape = input_shape[0]
+            query_shape, key_shape = input_shape
+        else:
+            query_shape = key_shape = input_shape
         # Build all sub-layers
-        self.attention.build(input_shape, input_shape)
-        self.dropout.build(input_shape)
-        self.layer_norm.build(input_shape)
-        self.ff_layer.build(input_shape)
-        self.ff_dropout.build(input_shape)
-        self.ff_layer_norm.build(input_shape)
-        self.input_spec = layers.InputSpec(shape=input_shape)
+        self.attention.build(query_shape, key_shape)
+        self.dropout.build(query_shape)
+        self.layer_norm.build(query_shape)
+        self.ff_layer.build(query_shape)
+        self.ff_dropout.build(query_shape)
+        self.ff_layer_norm.build(query_shape)
+        self.input_spec = layers.InputSpec(shape=query_shape)
 
     def call(
         self,
@@ -163,22 +189,20 @@ class MultiHeadAttentionBlock(layers.Layer):
         key=None,
         key_mask=None,
         value_mask=None,
+        query_mask=None,
         attention_mask=None,
         training=None,
     ):
         if key is None:
-            key = query
+            key = value
 
-        if attention_mask is not None:
-            if attention_mask.shape.rank == 2:
-                attention_mask = tf.expand_dims(attention_mask, axis=-1)
         attention_output = self.attention(
             query,
             value,
             key,
             attention_mask=attention_mask,
+            query_mask=query_mask,
             key_mask=key_mask,
-            value_mask=value_mask,
         )
         attention_output = self.dropout(attention_output, training=training)
         attention_output = self.layer_norm(attention_output + query)
@@ -210,219 +234,341 @@ class MultiHeadAttentionBlock(layers.Layer):
             + self.ff_layer_norm.count_params()
         )
 
+class MultiHeadAttentionStack(layers.Layer):
+    def __init__(self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, ff_dim=None, **kwargs):
+        super(MultiHeadAttentionStack, self).__init__(**kwargs)
+        self.attention_blocks = [
+            MultiHeadAttentionBlock(
+                num_heads=num_heads,
+                key_dim=key_dim,
+                dropout_rate=dropout_rate,
+                ff_dim=ff_dim,
+                name=f"multi_head_attention_block_{i+1}",
+            )
+            for i in range(stack_size)
+        ]
 
-class PoolingAttentionBlock(layers.Layer):
-    def __init__(
+    def call(
         self,
-        key_dim,
-        num_heads,
-        num_seed_vectors,
-        mlp_ratio=4,
-        dropout_rate=0.1,
-        **kwargs,
+        query,
+        value,
+        key=None,
+        key_mask=None,
+        value_mask=None,
+        query_mask=None,
+        attention_mask=None,
+        training=None,
     ):
-        super().__init__(**kwargs)
-        self.key_dim = key_dim
-        self.num_heads = num_heads
-        self.num_seed_vectors = num_seed_vectors
-        self.mlp_ratio = mlp_ratio
-        self.dropout_rate = dropout_rate
+        x = query
+        for block in self.attention_blocks:
+            x = block(
+                query=x,
+                value=value,
+                key=key,
+                key_mask=key_mask,
+                value_mask=value_mask,
+                query_mask=query_mask,
+                attention_mask=attention_mask,
+                training=training,
+            )
+        return x
 
-        # Learnable seed (latent) vectors
-        self.seed_vectors = self.add_weight(
-            shape=(num_seed_vectors, key_dim),
-            initializer="random_normal",
-            trainable=True,
-            name="seed_vectors"
-        )
-
-        # Attention layer: seeds as query, input as key/value
-        self.attn = layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=key_dim,
-            dropout=dropout_rate,
-            name="multihead_attention"
-        )
-        self.attn_norm = layers.LayerNormalization(epsilon=1e-6, name="attn_norm")
-        self.attn_dropout = layers.Dropout(dropout_rate)
-
-        # MLP block
-        self.mlp = keras.Sequential([
-            layers.Dense(key_dim * mlp_ratio, activation="gelu", name="mlp_dense_1"),
-            layers.Dropout(dropout_rate),
-            layers.Dense(key_dim, name="mlp_dense_2"),
-        ])
-        self.mlp_norm = layers.LayerNormalization(epsilon=1e-6, name="mlp_norm")
-        self.mlp_dropout = layers.Dropout(dropout_rate)
-
-    def call(self, inputs, mask=None, training=None):
-        batch_size = tf.shape(inputs)[0]
-
-        # Repeat seed vectors for batch
-        latent = tf.tile(tf.expand_dims(self.seed_vectors, axis=0), [batch_size, 1, 1])
-
-        # Attention: latent attends to input tokens
-        attn_output = self.attn(
-            query=latent,
-            value=inputs,
-            key=inputs,
-            value_mask=mask,
-            training=training
-        )
-        attn_output = self.attn_dropout(attn_output, training=training)
-        latent = self.attn_norm(latent + attn_output)
-
-        # Feedforward MLP
-        mlp_output = self.mlp(latent, training=training)
-        mlp_output = self.mlp_dropout(mlp_output, training=training)
-        output = self.mlp_norm(latent + mlp_output)
-
-        return output
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], self.num_seed_vectors, self.key_dim)
-
-    def build(self, input_shape):
-        super().build(input_shape)
-        # Ensure the layer is built with the correct input shape
-        if isinstance(input_shape, list):
-            input_shape = input_shape[0]
-        self.input_spec = layers.InputSpec(shape=input_shape)
-
-    def count_params(self):
-        return (
-            self.seed_vectors.shape.num_elements()
-            + self.attn.count_params()
-            + self.mlp.count_params()
-            + self.attn_norm.count_params()
-            + self.mlp_norm.count_params()
-            + self.attn_dropout.count_params()
-            + self.mlp_dropout.count_params()
-        )
+        return input_shape
 
     def get_config(self):
         config = super().get_config()
-        config.update({
-            "key_dim": self.key_dim,
-            "num_heads": self.num_heads,
-            "num_seed_vectors": self.num_seed_vectors,
-            "mlp_ratio": self.mlp_ratio,
-            "dropout_rate": self.dropout_rate,
-        })
+        config.update(
+            {
+                "num_heads": self.attention_blocks[0].num_heads,
+                "key_dim": self.attention_blocks[0].key_dim,
+                "stack_size": len(self.attention_blocks),
+                "dropout_rate": self.attention_blocks[0].dropout_rate,
+            }
+        )
         return config
 
-from . import MLP
-class PointTransformer(layers.Layer):
-    def __init__(self, key_dim, mlp_depth = 2, dropout_rate = 0, **kwargs):
-        super(PointTransformer, self).__init__(**kwargs)
-        self.key_dim = key_dim
-        self.phi = MLP(
-            key_dim,
-            num_layers=mlp_depth,
-            dropout_rate=dropout_rate,
-            name="phi_mlp",
-            hidden_activation="relu",
-            activation="linear"
-        )
-        self.psi = MLP(
-            key_dim,
-            num_layers=mlp_depth,
-            dropout_rate=dropout_rate,
-            name="psi_mlp",
-            hidden_activation="relu",
-            activation="linear"
-        )
-        self.pos_encoder = MLP(
-            key_dim,
-            num_layers=mlp_depth,
-            dropout_rate=dropout_rate,
-            name="pos_encoder_mlp",
-            hidden_activation="relu",
-            activation="linear"
-        )
-        self.alpha = MLP(
-            key_dim,
-            num_layers=mlp_depth,
-            dropout_rate=dropout_rate,
-            name="alpha_mlp",
-            hidden_activation="relu",
-            activation="linear"
-        )
-        self.theta = MLP(
-            key_dim,
-            num_layers=mlp_depth,
-            dropout_rate=dropout_rate,
-            name="theta_mlp",
-            hidden_activation="relu",
-            activation="linear"
-        )
-        self.gamma = MLP(
-            key_dim,
-            num_layers=mlp_depth,
-            dropout_rate=dropout_rate,
-            name="gamma_mlp",
-            hidden_activation="relu",
-            activation="linear"
-        )
-
     def build(self, input_shape):
-        super(PointTransformer, self).build(input_shape)
+        super(MultiHeadAttentionStack, self).build(input_shape)
+        for block in self.attention_blocks:
+            block.build(input_shape)
         # Ensure the layer is built with the correct input shape
         if isinstance(input_shape, list):
             input_shape = input_shape[0]
         self.input_spec = layers.InputSpec(shape=input_shape)
 
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], self.key_dim)
-    
     def count_params(self):
-        return (
-            self.phi.count_params()
-            + self.psi.count_params()
-            + self.pos_encoder.count_params()
-            + self.alpha.count_params()
-            + self.theta.count_params()
-            + self.gamma.count_params()
+        return sum(block.count_params() for block in self.attention_blocks)
+
+
+class PoolingAttentionBlock(layers.Layer):
+    def __init__(self, key_dim, num_seeds, num_heads=4, dropout_rate=0.0, ff_dim = None, **kwargs):
+        super(PoolingAttentionBlock, self).__init__(**kwargs)
+        self.key_dim = key_dim
+        self.num_seeds = num_seeds
+        self.num_heads = num_heads
+        self.dropout_rate = dropout_rate
+        self.seed_vectors = self.add_weight(
+            shape=(num_seeds, key_dim),
+            initializer="random_normal",
+            trainable=True,
+            name="seed_vectors",
+        )
+        if ff_dim is None:
+            ff_dim = key_dim * 2
+        self.ff_layer = keras.Sequential(
+            [
+                layers.Dense(ff_dim, activation="relu", name="ffn_dense_1"),
+                layers.Dense(key_dim, name="ffn_dense_2"),
+            ],
+            name="ffn_layer",
+        )
+        self.MHA = MultiHeadAttentionBlock(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            dropout_rate=dropout_rate,
+            name="pooling_attention_mha",
         )
 
-    @tf.function
-    def call(self, inputs, mask=None):
+    def build(self, input_shape):
+        super(PoolingAttentionBlock, self).build(input_shape)
+        seed_vectors_shape = (None, self.num_seeds, self.key_dim)
+
+        if len(input_shape) != 3:
+            raise ValueError(f"Expected input shape (batch_size, num_points, key_dim). Got {input_shape}.")
+
+        value_shape = (None, input_shape[1], self.key_dim)
+
+        self.ff_layer.build(input_shape)
+        self.MHA.build([seed_vectors_shape, value_shape])
+        # Ensure the layer is built with the correct input shape
+        if isinstance(input_shape, list):
+            input_shape = input_shape[0]
+        self.input_spec = layers.InputSpec(shape=input_shape)
+
+    def call(self, inputs, mask=None, training=None):
         # inputs: (batch_size, num_points, key_dim)
         batch_size = tf.shape(inputs)[0]
-        num_points = tf.shape(inputs)[1]
 
-        phi_x = self.phi(inputs)     # (batch, N, D)
-        psi_x = self.psi(inputs)     # (batch, N, D)
-        alpha_x = self.alpha(inputs) # (batch, N, D)
+        # Expand seed vectors to match batch size and number of points
+        seed_vectors_expanded = tf.broadcast_to(
+            self.seed_vectors[tf.newaxis, ...],
+            [batch_size, self.num_seeds, self.key_dim],
+        )
+        # Apply feed-forward layer to seed vectors
+        ff_inputs = self.ff_layer(inputs)
+        # Apply MultiHeadAttention
+        output = self.MHA(
+            query=seed_vectors_expanded,
+            value=ff_inputs,
+            key=ff_inputs,
+            key_mask=mask,
+        )
+        return output
 
-        # Pairwise differences
-        phi_exp = tf.expand_dims(phi_x, axis=1)  # (batch, 1, N, D)
-        psi_exp = tf.expand_dims(psi_x, axis=2)  # (batch, N, 1, D)
-        feature_diff = phi_exp - psi_exp         # (batch, N, N, D)
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.num_seeds, self.key_dim)
 
-        pos_enc = self.theta(feature_diff)       # (batch, N, N, D)
-        attn_logits = self.gamma(feature_diff + pos_enc)  # (batch, N, N, D)
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "key_dim": self.key_dim,
+                "num_seeds": self.num_seeds,
+                "num_heads": self.num_heads,
+                "dropout_rate": self.dropout_rate,
+            }
+        )
+        return config
 
-        # === Masking ===
-        if mask is not None:
-            # mask: (batch, num_points)
-            mask = tf.cast(mask, dtype=tf.float32)                       # (B, N)
-            mask_row = tf.expand_dims(mask, axis=1)                      # (B, 1, N)
-            mask_col = tf.expand_dims(mask, axis=2)                      # (B, N, 1)
-            pair_mask = mask_row * mask_col                              # (B, N, N)
-            pair_mask = tf.expand_dims(pair_mask, axis=-1)              # (B, N, N, 1)
-            attn_logits += (1.0 - pair_mask) * -1e9  # set logits of masked pairs to large negative
+    def count_params(self):
+        return (
+            self.MHA.count_params()
+            + self.seed_vectors.shape[0] * self.seed_vectors.shape[1]
+        )
 
-        # Vector-wise softmax: softmax over axis=2 (neighbor dim), for each feature channel
-        attn_weights = tf.nn.softmax(attn_logits, axis=2)  # (batch, N, N, D)
 
-        # Attention-weighted sum
-        alpha_exp = tf.expand_dims(alpha_x, axis=1)  # (batch, 1, N, D)
-        aggregated = attn_weights * (alpha_exp + pos_enc)  # (batch, N, N, D)
-        output = tf.reduce_sum(aggregated, axis=2)          # (batch, N, D)
+class InducedSetAttentionBlock(layers.Layer):
+    def __init__(
+        self, key_dim, num_seeds, num_heads=4, dropout_rate=0.0, ff_dim=None, **kwargs
+    ):
+        super(InducedSetAttentionBlock, self).__init__(**kwargs)
+        self.key_dim = key_dim
+        self.num_seeds = num_seeds
+        self.num_heads = num_heads
+        self.dropout_rate = dropout_rate
+        self.ff_dim = ff_dim
+        self.seed_vectors = self.add_weight(
+            shape=(num_seeds, key_dim),
+            initializer="random_normal",
+            trainable=True,
+            name="seed_vectors",
+        )
+        self.IMAB = MultiHeadAttentionBlock(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            dropout_rate=dropout_rate,
+            ff_dim=ff_dim,
+            name="induced_set_attention_mha",
+        )
+        self.MAB = MultiHeadAttentionBlock(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            dropout_rate=dropout_rate,
+            ff_dim=ff_dim,
+            name="induced_set_attention_mab",
+        )
+
+    def build(self, input_shape):
+        super(InducedSetAttentionBlock, self).build(input_shape)
+        seed_vectors_shape = (None, self.num_seeds, self.key_dim)
+
+        if len(input_shape) != 3:
+            raise ValueError(f"Expected input shape (batch_size, num_points, key_dim). Got {input_shape}.")
+
+        value_shape = (None, input_shape[1], self.key_dim)
+
+        self.IMAB.build([seed_vectors_shape, value_shape])
+        self.MAB.build([value_shape, seed_vectors_shape])
+        # Ensure the layer is built with the correct input shape
+        if isinstance(input_shape, list):
+            input_shape = input_shape[0]
+        self.input_spec = layers.InputSpec(shape=input_shape)
+
+    def call(self, inputs, mask=None, training=None):
+        # inputs: (batch_size, num_points, key_dim)
+        batch_size = tf.shape(inputs)[0]
+
+        # Expand seed vectors to match batch size and number of points
+        seed_vectors_expanded = tf.broadcast_to(
+            self.seed_vectors[tf.newaxis, ...],
+            [batch_size, self.num_seeds, self.key_dim],
+        )
+
+        # Apply Induced MultiHeadAttention Block
+        induced_output = self.IMAB(
+            query=seed_vectors_expanded,
+            value=inputs,
+            key=inputs,
+            key_mask=mask,
+        )
+
+        # Apply MultiHeadAttention Block
+        output = self.MAB(
+            query=inputs,
+            value=induced_output,
+            key=induced_output,
+            query_mask=mask,
+    )
 
         return output
 
-    def compute_mask(self, inputs, mask=None):
-        # propagate the input mask to the output
-        return mask
+
+class point_transformer(keras.layers.Layer):
+
+    def __init__(
+        self, dim=8, attn_hidden=4, pos_hidden=8, name=None, **kwargs
+    ):
+        super(point_transformer, self).__init__(name=name, **kwargs)
+
+
+        self.initializer = keras.initializers.HeNormal()
+
+        self.linear1 = keras.layers.Dense(
+            dim,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="self.linear1",
+        )
+        self.linear2 = keras.layers.Dense(
+            dim,
+            activation=None,
+            kernel_initializer=self.initializer,
+            name="self.linear2",
+        )
+        self.MLP_attn1 = layers.Dense(
+            attn_hidden,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="attn_hidden",
+        )
+        self.MLP_attn2 = layers.Dense(
+            dim,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="self.MLP_attn2",
+        )
+        self.MLP_pos1 = layers.Dense(
+            pos_hidden,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="pos_hidden",
+        )
+        self.MLP_pos2 = layers.Dense(
+            dim,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="self.MLP_pos2",
+        )
+        self.linear_query = layers.Dense(
+            dim,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="self.linear_query",
+        )
+        self.linear_key = layers.Dense(
+            dim,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="self.linear_key",
+        )
+        self.linear_value = layers.Dense(
+            dim,
+            activation="relu",
+            kernel_initializer=self.initializer,
+            name="self.linear_value",
+        )
+
+    def call(self, feature, pos, mask=None):
+
+        n = pos.shape[-2]
+
+        feature = self.linear1(feature)
+
+        query = self.linear_query(feature)
+        key = self.linear_key(feature)
+        value = self.linear_value(feature)
+
+        qk = query[:, None, :, :] - key[:, :, None, :] # (B, 1, N, D) - (B, N, 1, D) -> (B, N, N, D)
+        pos_rel = pos[:, None, :, :] - pos[:, :, None, :] # (B, 1, N, D) - (B, N, 1, D) -> (B, N, N, D)
+
+        value = value[:, None, :, :] # (B, 1, N, D)
+
+        pos_emb = self.MLP_pos1(pos_rel) # (B, N, N, D)
+        pos_emb = self.MLP_pos2(pos_emb) # (B, N, N, D)
+
+        value = value + pos_emb # (B, N, N, D)
+
+        mlp_attn1 = self.MLP_attn1(qk + pos_emb)
+        if mask is not None:
+            mask = tf.cast(mask, tf.bool) # Ensure mask is boolean
+            key_mask = mask[:, :, None] # (B, N, 1)
+            query_mask = mask[:, None, :] # (B, 1, N)
+            attention_mask = tf.math.logical_and(key_mask, query_mask) # (B, N, N)
+            attention_mask = tf.expand_dims(attention_mask, axis=-1) # (B, N, N, 1)
+        else:
+            attention_mask = tf.ones((tf.shape(feature)[0], n, n, 1), dtype=tf.bool) # (B, N, N, 1)
+        softmax_mask = tf.where(attention_mask, 0.0, -1e9)  # Apply mask to attention logits
+
+        mlp2_attn = self.MLP_attn2(mlp_attn1) + pos_emb + softmax_mask # (B, N, N, D)
+
+        attn = tf.nn.softmax(mlp2_attn, axis=-2) # (B, N, N, D)
+        out = value * attn # (B, N, N, D)
+        out = tf.math.reduce_sum(out, axis=-2) # (B, N, D)
+        out = self.linear2(out)
+
+        return out
+    
+    def compute_output_shape(self, input_shape):
+        return input_shape[0], input_shape[1], self.linear2.units

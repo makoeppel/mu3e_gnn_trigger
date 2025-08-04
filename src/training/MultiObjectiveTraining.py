@@ -146,3 +146,36 @@ class MultiObjectiveTrainer:
 
         mean_var_loss = total_var_loss / tf.cast(num_batches, tf.float32)
         return mean_var_loss
+
+
+    @tf.function
+    def train_reconstruction_step(self, dataset: tf.data.Dataset, encoder_optimizer, validation_dataset=None):
+        """Train the encoder using reconstruction loss only.
+        Args:
+            dataset (tf.data.Dataset): Dataset containing input samples.
+            encoder_optimizer (keras.optimizers.Optimizer): Optimizer for the encoder.
+            validation_dataset (tf.data.Dataset, optional): Dataset for validation.
+        Returns:
+            Mean reconstruction loss across the dataset.
+        """
+        self.autoencoder.trainable = False
+        self.encoder.trainable = True
+
+        total_recon_loss = 0.0
+        num_batches = 0
+
+        for input_sample in dataset:
+            with tf.GradientTape() as tape:
+                z = self.encoder(input_sample, training=True)
+                z_hat = self.autoencoder(z, training=False)
+                recon_loss = self.autoencoder_loss(z, z_hat)
+                loss = recon_loss
+
+            grads = tape.gradient(loss, self.encoder.trainable_variables)
+            encoder_optimizer.apply_gradients(zip(grads, self.encoder.trainable_variables))
+
+            total_recon_loss += recon_loss
+            num_batches += 1
+
+        mean_recon_loss = total_recon_loss / tf.cast(num_batches, tf.float32)
+        return mean_recon_loss

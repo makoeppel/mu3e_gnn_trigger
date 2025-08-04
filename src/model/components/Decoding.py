@@ -9,6 +9,7 @@ class DecoderQueries(layers.Layer):
         self.num_queries = num_queries
         self.feature_dim = feature_dim
 
+
     def build(self, input_shape):
         self.queries = self.add_weight(
             shape=(self.num_queries, self.feature_dim),
@@ -19,11 +20,12 @@ class DecoderQueries(layers.Layer):
         super(DecoderQueries, self).build(input_shape)
 
     def call(self, inputs):
-        return tf.random.normal(
-            (tf.shape(inputs)[0], self.num_queries, self.feature_dim),
-            stddev = inputs,
-            dtype=tf.float32,
-        )  + self.queries
+        batch_size = tf.shape(inputs)[0]
+        return tf.broadcast_to(
+            self.queries[tf.newaxis, ...],
+            [batch_size, self.num_queries, self.feature_dim],
+        )
+
 
     def get_config(self):
         config = super(DecoderQueries, self).get_config()

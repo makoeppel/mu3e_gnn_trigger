@@ -100,13 +100,12 @@ class UnitHyperSphereCoverLoss(keras.losses.Loss):
         temperature (float): Temperature parameter for scaling the distances.
     """
 
-    def __init__(self, latent_dim, temperature, **kwargs):
+    def __init__(self, temperature = 10, **kwargs):
         """Args:
         latent_dim (int): Dimension of the latent space.
         temperature (float): Temperature parameter for scaling the distances.
         """
         super().__init__(**kwargs)
-        self.latent_dim = latent_dim
         self.temperature = temperature
 
     def call(self, y_true, y_pred):
@@ -233,3 +232,26 @@ class VarianceCovarianceLoss(keras.losses.Loss):
 
     def call(self, _, y_pred):
         return self.var_loss(_, y_pred)  + self.cov_penalty * self.cov_loss(_, y_pred)
+
+
+class EmbeddingSpaceSpreading(keras.losses.Loss):
+    """Loss function to encourage low variance and covariance among latent vectors.
+    This loss computes the variance and covariance of the latent vectors and penalizes
+    them, encouraging the variance to be close to 1 and covariance to be close to 0.
+    Args:
+        target_std (float): Target standard deviation for the latent vectors.
+        **kwargs: Additional keyword arguments for the base class.
+    """
+
+    def __init__(self, target_std=1.0,var_penalty = 25, cov_penalty=1, swd_penalty = None, **kwargs):
+        super().__init__(**kwargs)
+        self.target_std = target_std
+        self.var_loss = VarianceLoss(target_std)
+        self.cov_loss = CovarianceLoss()
+        self.swd_loss = UnitHyperSphereCoverLoss()
+        self.cov_penalty = cov_penalty
+        self.var_penalty = var_penalty
+        self.swd_penalty = swd_penalty if swd_penalty is not None else var_penalty
+
+    def call(self, _, y_pred):
+        return self.var_penalty * self.var_loss(_, y_pred)  + self.cov_penalty * self.cov_loss(_, y_pred) + self.swd_loss(_, y_pred)

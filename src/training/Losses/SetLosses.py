@@ -54,10 +54,8 @@ class ChamferDistanceMasked(Loss):
         y_pred = self.coordinate_transform(y_pred)
 
         # Masks: (B, N) and (B, M)
-        mask_true = tf.reduce_any(
-            tf.not_equal(y_true, self.padding_value), axis=-1
-        )  # valid = True
-        mask_pred = tf.reduce_any(tf.not_equal(y_pred, self.padding_value), axis=-1)
+        mask_true = tf.reduce_any(tf.not_equal(y_true, self.padding_value), axis=-1)  # (B, N)
+        mask_pred = tf.reduce_any(tf.not_equal(y_pred, self.padding_value), axis=-1)  # (B, M)
 
         # Expand dims for broadcasting
         y_true_exp = tf.expand_dims(y_true, axis=2)  # (B, N, 1, D)
@@ -67,17 +65,25 @@ class ChamferDistanceMasked(Loss):
         diff = y_true_exp - y_pred_exp
         dist = tf.reduce_sum(tf.square(diff), axis=-1)  # (B, N, M)
 
-        # Min distances
-        min_true_to_pred = tf.reduce_min(dist, axis=2)  # (B, N)
-        min_pred_to_true = tf.reduce_min(dist, axis=1)  # (B, M)
+        # Create broadcasted masks: (B, N, M)
+        mask_true_exp = tf.expand_dims(mask_true, axis=2)  # (B, N, 1)
+        mask_pred_exp = tf.expand_dims(mask_pred, axis=1)  # (B, 1, M)
 
-        # Zero-out invalid entries (inf) and compute mean over valid
-        valid_min_true_to_pred = tf.where(
-            mask_true, min_true_to_pred, tf.zeros_like(min_true_to_pred)
-        )
-        valid_min_pred_to_true = tf.where(
-            mask_pred, min_pred_to_true, tf.zeros_like(min_pred_to_true)
-        )
+        # Combine masks: (B, N, M), only valid where both y_true[n] and y_pred[m] are valid
+        valid_mask = tf.logical_and(mask_true_exp, mask_pred_exp)
+
+        # Set invalid distances to large value so they are ignored in reduce_min
+        large_number = 1e10
+        dist_masked_true_to_pred = tf.where(valid_mask, dist, tf.ones_like(dist) * large_number)
+        dist_masked_pred_to_true = tf.transpose(dist_masked_true_to_pred, perm=[0, 2, 1])  # (B, M, N)
+
+        # Min distances for valid entries
+        min_true_to_pred = tf.reduce_min(dist_masked_true_to_pred, axis=2)  # (B, N)
+        min_pred_to_true = tf.reduce_min(dist_masked_pred_to_true, axis=2)  # (B, M)
+
+        # Zero-out invalid entries and compute mean over valid
+        valid_min_true_to_pred = tf.where(mask_true, min_true_to_pred, tf.zeros_like(min_true_to_pred))
+        valid_min_pred_to_true = tf.where(mask_pred, min_pred_to_true, tf.zeros_like(min_pred_to_true))
 
         sum_true = tf.reduce_sum(valid_min_true_to_pred)
         sum_pred = tf.reduce_sum(valid_min_pred_to_true)
@@ -89,10 +95,7 @@ class ChamferDistanceMasked(Loss):
         mean_true_to_pred = sum_true / (count_true + 1e-8)
         mean_pred_to_true = sum_pred / (count_pred + 1e-8)
 
-        y_true_std = tf.math.reduce_variance(y_true, axis = 0)
-        y_pred_std = tf.math.reduce_variance(y_pred, axis = 0)
-
-        return mean_true_to_pred + mean_pred_to_true + 10 * tf.reduce_sum(tf.square(y_true_std - y_pred_std))
+        return mean_true_to_pred + mean_pred_to_true
 
 
 class ChamferDistanceOutlierPunish(Loss):

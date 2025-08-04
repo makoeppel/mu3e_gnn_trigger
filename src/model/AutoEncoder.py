@@ -10,13 +10,16 @@ class AutoEncoder(keras.Model):
         self.latent_dim = latent_dim
         self.encoder = MLP(latent_dim, num_layers, activation='relu', name='encoder')
         self.decoder = MLP(input_size, num_layers, activation='linear', name='decoder')
+        input = keras.layers.Input(shape=(input_size,))
+        encoded = self.encoder(input)
+        decoded = self.decoder(encoded)
 
 
     def call(self, inputs):
         encoded = self.encoder(inputs)
         decoded = self.decoder(encoded)
         return decoded
-    
+
     def encode(self, inputs):
         return self.encoder(inputs)
     
