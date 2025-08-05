@@ -4,19 +4,19 @@ from keras import layers
 
 
 class DecoderQueries(layers.Layer):
-    def __init__(self, num_queries, feature_dim, **kwargs):
+    def __init__(self, num_queries, feature_dim, learnable = False, **kwargs):
         super(DecoderQueries, self).__init__(**kwargs)
         self.num_queries = num_queries
         self.feature_dim = feature_dim
-
-
-    def build(self, input_shape):
         self.queries = self.add_weight(
             shape=(self.num_queries, self.feature_dim),
             initializer="random_normal",
             trainable=True,
             name="queries",
         )
+
+
+    def build(self, input_shape):
         super(DecoderQueries, self).build(input_shape)
 
     def call(self, inputs):

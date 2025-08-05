@@ -5,3 +5,4 @@ model_cache
 *.png
 *.pdf
 plots/**
+venv/

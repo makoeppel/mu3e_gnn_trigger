@@ -100,7 +100,7 @@ class UnitHyperSphereCoverLoss(keras.losses.Loss):
         temperature (float): Temperature parameter for scaling the distances.
     """
 
-    def __init__(self, temperature = 10, **kwargs):
+    def __init__(self, temperature=10, **kwargs):
         """Args:
         latent_dim (int): Dimension of the latent space.
         temperature (float): Temperature parameter for scaling the distances.
@@ -190,7 +190,7 @@ class ContrastiveLoss(keras.losses.Loss):
         **kwargs: Additional keyword arguments for the base class.
     """
 
-    def __init__(self, contrastive_views=4, var_mtpl=1, cov_mtpl=1, **kwargs):
+    def __init__(self, contrastive_views=4, var_mtpl=25, cov_mtpl=1, **kwargs):
         super().__init__(**kwargs)
         self.contrastive_views = contrastive_views
         self.var_mtpl = var_mtpl
@@ -206,11 +206,19 @@ class ContrastiveLoss(keras.losses.Loss):
             # Compute pairwise contrastive loss
             for j in range(i + 1, self.contrastive_views):
                 loss += tf.reduce_mean(tf.square(outputs[i] - outputs[j])) / (
-                    self.contrastive_views - 1
+                    self.contrastive_views * (self.contrastive_views - 1) / 2
                 )
-            loss += self.var_mtpl * self.var_loss(outputs[i], outputs[i])
-            loss += self.cov_mtpl * self.cov_loss(outputs[i], outputs[i])
-            loss += self.swd_loss(outputs[i], outputs[i])
+            loss += (
+                self.var_mtpl
+                * self.var_loss(outputs[i], outputs[i])
+                / self.contrastive_views
+            )
+            loss += (
+                self.cov_mtpl
+                * self.cov_loss(outputs[i], outputs[i])
+                / self.contrastive_views
+            )
+            loss += self.swd_loss(outputs[i], outputs[i]) / self.contrastive_views
         return loss
 
 
@@ -231,7 +239,7 @@ class VarianceCovarianceLoss(keras.losses.Loss):
         self.cov_penalty = cov_penalty
 
     def call(self, _, y_pred):
-        return self.var_loss(_, y_pred)  + self.cov_penalty * self.cov_loss(_, y_pred)
+        return self.var_loss(_, y_pred) + self.cov_penalty * self.cov_loss(_, y_pred)
 
 
 class EmbeddingSpaceSpreading(keras.losses.Loss):
@@ -243,7 +251,9 @@ class EmbeddingSpaceSpreading(keras.losses.Loss):
         **kwargs: Additional keyword arguments for the base class.
     """
 
-    def __init__(self, target_std=1.0,var_penalty = 25, cov_penalty=1, swd_penalty = None, **kwargs):
+    def __init__(
+        self, target_std=1.0, var_penalty=25, cov_penalty=1, swd_penalty=None, **kwargs
+    ):
         super().__init__(**kwargs)
         self.target_std = target_std
         self.var_loss = VarianceLoss(target_std)
@@ -254,4 +264,8 @@ class EmbeddingSpaceSpreading(keras.losses.Loss):
         self.swd_penalty = swd_penalty if swd_penalty is not None else var_penalty
 
     def call(self, _, y_pred):
-        return self.var_penalty * self.var_loss(_, y_pred)  + self.cov_penalty * self.cov_loss(_, y_pred) + self.swd_loss(_, y_pred)
+        return (
+            self.var_penalty * self.var_loss(_, y_pred)
+            + self.cov_penalty * self.cov_loss(_, y_pred)
+            + self.swd_loss(_, y_pred)
+        )

@@ -53,49 +53,34 @@ class ChamferDistanceMasked(Loss):
         y_true = self.coordinate_transform(y_true)
         y_pred = self.coordinate_transform(y_pred)
 
-        # Masks: (B, N) and (B, M)
-        mask_true = tf.reduce_any(tf.not_equal(y_true, self.padding_value), axis=-1)  # (B, N)
-        mask_pred = tf.reduce_any(tf.not_equal(y_pred, self.padding_value), axis=-1)  # (B, M)
+        mask_true = tf.reduce_any(tf.not_equal(y_true, self.padding_value), axis=-1)
+        mask_pred = tf.reduce_any(tf.not_equal(y_pred, self.padding_value), axis=-1)
 
-        # Expand dims for broadcasting
-        y_true_exp = tf.expand_dims(y_true, axis=2)  # (B, N, 1, D)
-        y_pred_exp = tf.expand_dims(y_pred, axis=1)  # (B, 1, M, D)
+        valid_mask = tf.logical_and(
+            tf.expand_dims(mask_true, axis=1), tf.expand_dims(mask_pred, axis=0)
+        )  # (B, N, M)
 
-        # Compute squared distances
-        diff = y_true_exp - y_pred_exp
-        dist = tf.reduce_sum(tf.square(diff), axis=-1)  # (B, N, M)
+        # Compute pairwise distances
+        diff = tf.expand_dims(y_true, axis=1) - tf.expand_dims(y_pred, axis=0)
 
-        # Create broadcasted masks: (B, N, M)
-        mask_true_exp = tf.expand_dims(mask_true, axis=2)  # (B, N, 1)
-        mask_pred_exp = tf.expand_dims(mask_pred, axis=1)  # (B, 1, M)
-
-        # Combine masks: (B, N, M), only valid where both y_true[n] and y_pred[m] are valid
-        valid_mask = tf.logical_and(mask_true_exp, mask_pred_exp)
-
-        # Set invalid distances to large value so they are ignored in reduce_min
-        large_number = 1e10
-        dist_masked_true_to_pred = tf.where(valid_mask, dist, tf.ones_like(dist) * large_number)
-        dist_masked_pred_to_true = tf.transpose(dist_masked_true_to_pred, perm=[0, 2, 1])  # (B, M, N)
-
-        # Min distances for valid entries
-        min_true_to_pred = tf.reduce_min(dist_masked_true_to_pred, axis=2)  # (B, N)
-        min_pred_to_true = tf.reduce_min(dist_masked_pred_to_true, axis=2)  # (B, M)
-
-        # Zero-out invalid entries and compute mean over valid
-        valid_min_true_to_pred = tf.where(mask_true, min_true_to_pred, tf.zeros_like(min_true_to_pred))
-        valid_min_pred_to_true = tf.where(mask_pred, min_pred_to_true, tf.zeros_like(min_pred_to_true))
-
-        sum_true = tf.reduce_sum(valid_min_true_to_pred)
-        sum_pred = tf.reduce_sum(valid_min_pred_to_true)
-
-        count_true = tf.reduce_sum(tf.cast(mask_true, tf.float32))
-        count_pred = tf.reduce_sum(tf.cast(mask_pred, tf.float32))
-
-        # Avoid division by zero
-        mean_true_to_pred = sum_true / (count_true + 1e-8)
-        mean_pred_to_true = sum_pred / (count_pred + 1e-8)
-
-        return mean_true_to_pred + mean_pred_to_true
+        large_value = 1e9
+        dist_sq = tf.where(
+            valid_mask,
+            tf.reduce_sum(tf.square(diff), axis=-1),
+            tf.fill(tf.shape(diff[..., 0]), large_value),
+        )  # (B, N, M)
+        # Get min distances in both directions
+        min_dist_true = tf.reduce_min(dist_sq, axis=1)  # (N,)
+        min_dist_pred = tf.reduce_min(dist_sq, axis=0)  # (M,)
+        # Apply mask before averaging
+        loss_true = tf.reduce_sum(min_dist_true * tf.cast(mask_true, tf.float32)) / (
+            tf.reduce_sum(tf.cast(mask_true, tf.float32)) + 1e-6
+        )
+        loss_pred = tf.reduce_sum(min_dist_pred * tf.cast(mask_pred, tf.float32)) / (
+            tf.reduce_sum(tf.cast(mask_pred, tf.float32)) + 1e-6
+        )
+        chamfer_loss = loss_true + loss_pred
+        return chamfer_loss
 
 
 class ChamferDistanceOutlierPunish(Loss):
@@ -133,7 +118,9 @@ class ChamferDistanceOutlierPunish(Loss):
                 axis=-1,
             )
         else:
-            raise ValueError(f"Unknown mode: {mode}. Supported modes are 'cartesian', 'cylindrical', and 'spherical'.")
+            raise ValueError(
+                f"Unknown mode: {mode}. Supported modes are 'cartesian', 'cylindrical', and 'spherical'."
+            )
 
     def call(self, y_true, y_pred):
         """
@@ -170,7 +157,7 @@ class ChamferDistanceOutlierPunish(Loss):
 
         # Get min distances in both directions
         min_dist_true = tf.math.exp(tf.reduce_min(dist_sq, axis=2))  # (B, N)
-        min_dist_pred = tf.math.exp(tf.reduce_min(dist_sq, axis=1)) # (B, M)
+        min_dist_pred = tf.math.exp(tf.reduce_min(dist_sq, axis=1))  # (B, M)
 
         # Apply mask before averaging
         loss_true = tf.reduce_sum(min_dist_true * mask_true_f) / (
@@ -199,11 +186,10 @@ class ChamferDistanceOutlierPunish(Loss):
 
         outlier_penalty = outlier_loss_true + outlier_loss_pred
 
+        y_true_std = tf.math.reduce_variance(y_true, axis=0)
+        y_pred_std = tf.math.reduce_variance(y_pred, axis=0)
 
-        y_true_std = tf.math.reduce_variance(y_true, axis = 0)
-        y_pred_std = tf.math.reduce_variance(y_pred, axis = 0)
-
-        return chamfer_loss 
+        return chamfer_loss
 
 
 class MaskedMSE(Loss):

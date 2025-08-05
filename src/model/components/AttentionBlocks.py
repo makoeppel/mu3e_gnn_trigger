@@ -37,6 +37,7 @@ class SelfAttentionBlock(layers.Layer):
 
         self.dropout2 = layers.Dropout(dropout_rate)
         self.layer_norm_2 = layers.LayerNormalization(name="layer_norm_2")
+        self.supports_masking = True
 
     def call(self, inputs, mask=None, training=None):
         attention_output = self.attention(
@@ -106,6 +107,7 @@ class SelfAttentionStack(layers.Layer):
             )
             for i in range(stack_size)  # Example: 2 attention blocks
         ]
+        self.supports_masking = True
 
     def call(self, inputs, mask=None, training=None):
         x = inputs
@@ -165,6 +167,8 @@ class MultiHeadAttentionBlock(layers.Layer):
         )
         self.ff_dropout = layers.Dropout(dropout_rate, name="ffn_dropout")
         self.ff_layer_norm = layers.LayerNormalization(name="ffn_layer_norm")
+        self.supports_masking = True
+
 
     def build(self, input_shape):
         super(MultiHeadAttentionBlock, self).build(input_shape)
@@ -247,6 +251,7 @@ class MultiHeadAttentionStack(layers.Layer):
             )
             for i in range(stack_size)
         ]
+        self.supports_masking = True
 
     def call(
         self,
