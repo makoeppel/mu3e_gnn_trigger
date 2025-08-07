@@ -14,6 +14,7 @@ class SelfAttentionBlock(layers.Layer):
         name="self_attention_block",
         **kwargs,
     ):
+        self.regularizer = kwargs.pop("regularizer", None)
         super(SelfAttentionBlock, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.key_dim = key_dim
@@ -21,22 +22,49 @@ class SelfAttentionBlock(layers.Layer):
         if ff_dim is None:
             ff_dim = key_dim * 2
 
+
         self.attention = layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=key_dim, name="self_attention_layer"
+            num_heads=num_heads,
+            key_dim=key_dim,
+            name="self_attention_layer",
+            kernel_regularizer=self.regularizer,
+            bias_regularizer=self.regularizer,
+            activity_regularizer=self.regularizer,
         )
         self.dropout1 = layers.Dropout(dropout_rate, name="dropout_1")
-        self.layer_norm_1 = layers.LayerNormalization(name="layer_norm_1")
+        self.layer_norm_1 = layers.LayerNormalization(
+            name="layer_norm_1",
+            gamma_regularizer=self.regularizer,
+            beta_regularizer=self.regularizer,
+        )
 
         self.ff_layer = keras.Sequential(
             [
-                layers.Dense(ff_dim, activation="relu", name="ffn_dense_1"),
-                layers.Dense(key_dim, name="ffn_dense_2"),
+                layers.Dense(
+                    ff_dim,
+                    activation="relu",
+                    name="ffn_dense_1",
+                    kernel_regularizer=self.regularizer,
+                    bias_regularizer=self.regularizer,
+                    activity_regularizer=self.regularizer,
+                ),
+                layers.Dense(
+                    key_dim,
+                    name="ffn_dense_2",
+                    kernel_regularizer=self.regularizer,
+                    bias_regularizer=self.regularizer,
+                    activity_regularizer=self.regularizer,
+                ),
             ],
             name="ffn_layer",
         )
 
         self.dropout2 = layers.Dropout(dropout_rate)
-        self.layer_norm_2 = layers.LayerNormalization(name="layer_norm_2")
+        self.layer_norm_2 = layers.LayerNormalization(
+            name="layer_norm_2",
+            gamma_regularizer=self.regularizer,
+            beta_regularizer=self.regularizer,
+        )
         self.supports_masking = True
 
     def call(self, inputs, mask=None, training=None):
@@ -96,6 +124,7 @@ class SelfAttentionStack(layers.Layer):
     def __init__(
         self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, ff_dim=None, **kwargs
     ):
+        regularizer = kwargs.pop("regularizer", None)
         super(SelfAttentionStack, self).__init__(**kwargs)
         self.attention_blocks = [
             SelfAttentionBlock(
@@ -104,6 +133,7 @@ class SelfAttentionStack(layers.Layer):
                 dropout_rate=dropout_rate,
                 ff_dim=ff_dim,
                 name=f"attention_block_{i+1}",
+                regularizer=regularizer,
             )
             for i in range(stack_size)  # Example: 2 attention blocks
         ]
@@ -145,30 +175,56 @@ class SelfAttentionStack(layers.Layer):
 
 class MultiHeadAttentionBlock(layers.Layer):
     def __init__(self, num_heads, key_dim, dropout_rate=0.0, ff_dim=None, **kwargs):
+        self.regularizer = kwargs.pop("regularizer", None)
+
         super(MultiHeadAttentionBlock, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.key_dim = key_dim
         if ff_dim is None:
             ff_dim = key_dim * 2
 
+
         self.attention = layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=key_dim, name="multi_head_attention_layer"
+            num_heads=num_heads,
+            key_dim=key_dim,
+            name="multi_head_attention_layer",
+            kernel_regularizer=self.regularizer,
+            bias_regularizer=self.regularizer,
+            activity_regularizer=self.regularizer,
         )
         self.dropout = layers.Dropout(dropout_rate, name="multi_head_attention_dropout")
         self.layer_norm = layers.LayerNormalization(
-            name="multi_head_attention_layer_norm"
+            name="multi_head_attention_layer_norm",
+            beta_regularizer=self.regularizer,
+            gamma_regularizer=self.regularizer,
         )
         self.ff_layer = keras.Sequential(
             [
-                layers.Dense(ff_dim, activation="relu", name="ffn_dense_1"),
-                layers.Dense(key_dim, name="ffn_dense_2"),
+                layers.Dense(
+                    ff_dim,
+                    activation="relu",
+                    name="ffn_dense_1",
+                    kernel_regularizer=self.regularizer,
+                    bias_regularizer=self.regularizer,
+                    activity_regularizer=self.regularizer,
+                ),
+                layers.Dense(
+                    key_dim,
+                    name="ffn_dense_2",
+                    kernel_regularizer=self.regularizer,
+                    bias_regularizer=self.regularizer,
+                    activity_regularizer=self.regularizer,
+                ),
             ],
             name="ffn_layer",
         )
         self.ff_dropout = layers.Dropout(dropout_rate, name="ffn_dropout")
-        self.ff_layer_norm = layers.LayerNormalization(name="ffn_layer_norm")
+        self.ff_layer_norm = layers.LayerNormalization(
+            name="ffn_layer_norm",
+            beta_regularizer=self.regularizer,
+            gamma_regularizer=self.regularizer,
+        )
         self.supports_masking = True
-
 
     def build(self, input_shape):
         super(MultiHeadAttentionBlock, self).build(input_shape)
@@ -238,8 +294,13 @@ class MultiHeadAttentionBlock(layers.Layer):
             + self.ff_layer_norm.count_params()
         )
 
+
 class MultiHeadAttentionStack(layers.Layer):
-    def __init__(self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, ff_dim=None, **kwargs):
+    def __init__(
+        self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, ff_dim=None, **kwargs
+    ):
+        regularizer = kwargs.pop("regularizer", None)
+
         super(MultiHeadAttentionStack, self).__init__(**kwargs)
         self.attention_blocks = [
             MultiHeadAttentionBlock(
@@ -248,6 +309,7 @@ class MultiHeadAttentionStack(layers.Layer):
                 dropout_rate=dropout_rate,
                 ff_dim=ff_dim,
                 name=f"multi_head_attention_block_{i+1}",
+                regularizer=regularizer,
             )
             for i in range(stack_size)
         ]
@@ -278,7 +340,6 @@ class MultiHeadAttentionStack(layers.Layer):
             )
         return x
 
-
     def compute_output_shape(self, input_shape):
         return input_shape
 
@@ -308,24 +369,43 @@ class MultiHeadAttentionStack(layers.Layer):
 
 
 class PoolingAttentionBlock(layers.Layer):
-    def __init__(self, key_dim, num_seeds, num_heads=4, dropout_rate=0.0, ff_dim = None, **kwargs):
+    def __init__(
+        self, key_dim, num_seeds, num_heads=4, dropout_rate=0.0, ff_dim=None, **kwargs
+    ):
+        self.regularizer = kwargs.pop("regularizer", None)
         super(PoolingAttentionBlock, self).__init__(**kwargs)
         self.key_dim = key_dim
         self.num_seeds = num_seeds
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
+
         self.seed_vectors = self.add_weight(
             shape=(num_seeds, key_dim),
             initializer="random_normal",
             trainable=True,
             name="seed_vectors",
+            regularizer=self.regularizer,
         )
+
         if ff_dim is None:
             ff_dim = key_dim * 2
         self.ff_layer = keras.Sequential(
             [
-                layers.Dense(ff_dim, activation="relu", name="ffn_dense_1"),
-                layers.Dense(key_dim, name="ffn_dense_2"),
+                layers.Dense(
+                    ff_dim,
+                    activation="relu",
+                    name="ffn_dense_1",
+                    kernel_regularizer=self.regularizer,
+                    bias_regularizer=self.regularizer,
+                    activity_regularizer=self.regularizer,
+                ),
+                layers.Dense(
+                    key_dim,
+                    name="ffn_dense_2",
+                    kernel_regularizer=self.regularizer,
+                    bias_regularizer=self.regularizer,
+                    activity_regularizer=self.regularizer,
+                ),
             ],
             name="ffn_layer",
         )
@@ -334,6 +414,8 @@ class PoolingAttentionBlock(layers.Layer):
             key_dim=key_dim,
             dropout_rate=dropout_rate,
             name="pooling_attention_mha",
+            regularizer=self.regularizer,
+            ff_dim=ff_dim,
         )
 
     def build(self, input_shape):
@@ -341,7 +423,9 @@ class PoolingAttentionBlock(layers.Layer):
         seed_vectors_shape = (None, self.num_seeds, self.key_dim)
 
         if len(input_shape) != 3:
-            raise ValueError(f"Expected input shape (batch_size, num_points, key_dim). Got {input_shape}.")
+            raise ValueError(
+                f"Expected input shape (batch_size, num_points, key_dim). Got {input_shape}."
+            )
 
         value_shape = (None, input_shape[1], self.key_dim)
 
@@ -430,7 +514,9 @@ class InducedSetAttentionBlock(layers.Layer):
         seed_vectors_shape = (None, self.num_seeds, self.key_dim)
 
         if len(input_shape) != 3:
-            raise ValueError(f"Expected input shape (batch_size, num_points, key_dim). Got {input_shape}.")
+            raise ValueError(
+                f"Expected input shape (batch_size, num_points, key_dim). Got {input_shape}."
+            )
 
         value_shape = (None, input_shape[1], self.key_dim)
 
@@ -465,18 +551,15 @@ class InducedSetAttentionBlock(layers.Layer):
             value=induced_output,
             key=induced_output,
             query_mask=mask,
-    )
+        )
 
         return output
 
 
 class point_transformer(keras.layers.Layer):
 
-    def __init__(
-        self, dim=8, attn_hidden=4, pos_hidden=8, name=None, **kwargs
-    ):
+    def __init__(self, dim=8, attn_hidden=4, pos_hidden=8, name=None, **kwargs):
         super(point_transformer, self).__init__(name=name, **kwargs)
-
 
         self.initializer = keras.initializers.HeNormal()
 
@@ -545,35 +628,43 @@ class point_transformer(keras.layers.Layer):
         key = self.linear_key(feature)
         value = self.linear_value(feature)
 
-        qk = query[:, None, :, :] - key[:, :, None, :] # (B, 1, N, D) - (B, N, 1, D) -> (B, N, N, D)
-        pos_rel = pos[:, None, :, :] - pos[:, :, None, :] # (B, 1, N, D) - (B, N, 1, D) -> (B, N, N, D)
+        qk = (
+            query[:, None, :, :] - key[:, :, None, :]
+        )  # (B, 1, N, D) - (B, N, 1, D) -> (B, N, N, D)
+        pos_rel = (
+            pos[:, None, :, :] - pos[:, :, None, :]
+        )  # (B, 1, N, D) - (B, N, 1, D) -> (B, N, N, D)
 
-        value = value[:, None, :, :] # (B, 1, N, D)
+        value = value[:, None, :, :]  # (B, 1, N, D)
 
-        pos_emb = self.MLP_pos1(pos_rel) # (B, N, N, D)
-        pos_emb = self.MLP_pos2(pos_emb) # (B, N, N, D)
+        pos_emb = self.MLP_pos1(pos_rel)  # (B, N, N, D)
+        pos_emb = self.MLP_pos2(pos_emb)  # (B, N, N, D)
 
-        value = value + pos_emb # (B, N, N, D)
+        value = value + pos_emb  # (B, N, N, D)
 
         mlp_attn1 = self.MLP_attn1(qk + pos_emb)
         if mask is not None:
-            mask = tf.cast(mask, tf.bool) # Ensure mask is boolean
-            key_mask = mask[:, :, None] # (B, N, 1)
-            query_mask = mask[:, None, :] # (B, 1, N)
-            attention_mask = tf.math.logical_and(key_mask, query_mask) # (B, N, N)
-            attention_mask = tf.expand_dims(attention_mask, axis=-1) # (B, N, N, 1)
+            mask = tf.cast(mask, tf.bool)  # Ensure mask is boolean
+            key_mask = mask[:, :, None]  # (B, N, 1)
+            query_mask = mask[:, None, :]  # (B, 1, N)
+            attention_mask = tf.math.logical_and(key_mask, query_mask)  # (B, N, N)
+            attention_mask = tf.expand_dims(attention_mask, axis=-1)  # (B, N, N, 1)
         else:
-            attention_mask = tf.ones((tf.shape(feature)[0], n, n, 1), dtype=tf.bool) # (B, N, N, 1)
-        softmax_mask = tf.where(attention_mask, 0.0, -1e9)  # Apply mask to attention logits
+            attention_mask = tf.ones(
+                (tf.shape(feature)[0], n, n, 1), dtype=tf.bool
+            )  # (B, N, N, 1)
+        softmax_mask = tf.where(
+            attention_mask, 0.0, -1e9
+        )  # Apply mask to attention logits
 
-        mlp2_attn = self.MLP_attn2(mlp_attn1) + pos_emb + softmax_mask # (B, N, N, D)
+        mlp2_attn = self.MLP_attn2(mlp_attn1) + pos_emb + softmax_mask  # (B, N, N, D)
 
-        attn = tf.nn.softmax(mlp2_attn, axis=-2) # (B, N, N, D)
-        out = value * attn # (B, N, N, D)
-        out = tf.math.reduce_sum(out, axis=-2) # (B, N, D)
+        attn = tf.nn.softmax(mlp2_attn, axis=-2)  # (B, N, N, D)
+        out = value * attn  # (B, N, N, D)
+        out = tf.math.reduce_sum(out, axis=-2)  # (B, N, D)
         out = self.linear2(out)
 
         return out
-    
+
     def compute_output_shape(self, input_shape):
         return input_shape[0], input_shape[1], self.linear2.units

@@ -7,12 +7,13 @@ class MLP(keras.layers.Layer):
         output_dim,
         num_layers=3,
         layer_norm=False,
-        activation="relu",
-        hidden_activation="swish",
+        activation="linear",
+        hidden_activation="relu",
         dropout_rate=0,
         name = "mlp_dense",
         **kwargs,
     ):
+        self.regularizer = kwargs.pop('regularizer', None)
         super().__init__(**kwargs)
         self.output_dim = output_dim
         self.num_layers = num_layers
@@ -32,7 +33,10 @@ class MLP(keras.layers.Layer):
         ]
         for i, width in enumerate(node_list):
             self.layers_list.append(
-                keras.layers.Dense(width, activation=self.hidden_activation, name=f"{self.name}_mlp_dense_{i}")
+                keras.layers.Dense(width, activation=self.hidden_activation, name=f"{self.name}_mlp_dense_{i}", 
+                                   kernel_regularizer=self.regularizer,
+                                   bias_regularizer=self.regularizer,
+                                   activity_regularizer=self.regularizer)
             )
             if i == 0:
                 input_shape_list.append((input_shape[:-1], input_dim))
@@ -50,7 +54,10 @@ class MLP(keras.layers.Layer):
                 input_shape_list.append((input_shape[:-1], width))
 
         self.layers_list.append(
-            keras.layers.Dense(self.output_dim, activation=self.activation, name=f"{self.name}_mlp_dense_output")
+            keras.layers.Dense(self.output_dim, activation=self.activation, name=f"{self.name}_mlp_dense_output",
+                                kernel_regularizer=self.regularizer,
+                                   bias_regularizer=self.regularizer,
+                                   activity_regularizer=self.regularizer)
         )
         input_shape_list.append((input_shape[:-1], node_list[-1]))
         if self.layer_norm:

@@ -81,6 +81,74 @@ class ChamferDistanceMasked(Loss):
         )
         chamfer_loss = loss_true + loss_pred
         return chamfer_loss
+    
+
+
+@keras.utils.register_keras_serializable(package="Custom", name="ChamferDistanceMasked")
+class ChamferDistance(Loss):
+    def __init__(
+        self, name="chamfer_distance", mode="cartesian"
+    ):
+        """
+        padding_value: Value used to pad the input tensors.
+        mode: Coordinate system for distance calculation.
+            - "cartesian": Standard Cartesian coordinates.
+            - "cylindrical": Cylindrical coordinates (r, theta, z).
+            - "spherical": Spherical coordinates (r, theta, phi).
+        """
+        super().__init__(name=name)
+        mode = mode.lower()
+        if mode == "cartesian":
+            self.coordinate_transform = lambda x: x
+        elif mode == "cylindrical":
+            self.coordinate_transform = lambda x: tf.stack(
+                [
+                    x[..., 0] * tf.cos(x[..., 1]),
+                    x[..., 0] * tf.sin(x[..., 1]),
+                    x[..., 2],
+                ],
+                axis=-1,
+            )
+        elif mode == "spherical":
+            self.coordinate_transform = lambda x: tf.stack(
+                [
+                    x[..., 0] * tf.sin(x[..., 1]) * tf.cos(x[..., 2]),
+                    x[..., 0] * tf.sin(x[..., 1]) * tf.sin(x[..., 2]),
+                    x[..., 0] * tf.cos(x[..., 1]),
+                ],
+                axis=-1,
+            )
+        else:
+            raise ValueError(
+                f"Unknown mode: {mode}. Supported modes are 'cartesian', 'cylindrical', and 'spherical'."
+            )
+
+    def call(self, y_true, y_pred):
+        """
+        y_true: (B, N, D)
+        y_pred: (B, M, D)
+        """
+        # Transform coordinates if necessary
+        y_true = self.coordinate_transform(y_true)
+        y_pred = self.coordinate_transform(y_pred)
+
+        # Compute pairwise distances
+        diff = tf.expand_dims(y_true, axis=1) - tf.expand_dims(y_pred, axis=0)
+
+        dist_sq = tf.reduce_sum(tf.square(diff), axis=-1)  # (B, N, M)
+
+        # Get min distances in both directions
+        min_dist_true = tf.reduce_min(dist_sq, axis=1)  # (N,)
+        min_dist_pred = tf.reduce_min(dist_sq, axis=0)  # (M,)
+
+        # Compute the loss
+        loss_true = tf.reduce_mean(min_dist_true)  # Average over N
+        loss_pred = tf.reduce_mean(min_dist_pred)  # Average over M    
+
+        chamfer_loss = loss_true + loss_pred
+        return chamfer_loss
+    
+
 
 
 class ChamferDistanceOutlierPunish(Loss):

@@ -27,7 +27,7 @@ def normalize_data(data, type : str = "minmax", feature_axis = -1, feature_range
     data = np.moveaxis(data, feature_axis, -1)
 
     if type == "minmax":
-        mask = (data != padding_value).any(axis=-1)
+        mask = (data != padding_value).any(axis=feature_axis)
         min_vals = np.min(np.where(mask[..., None], data, np.inf), axis=(0, 1))
         max_vals = np.max(np.where(mask[..., None], data, -np.inf), axis=(0, 1))
         range_vals = max_vals - min_vals
