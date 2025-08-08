@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 import keras
 
-def make_siamese_autoencoder(input_shape, base_model : keras.Model, num_contrastive_views=4):
+def make_siamese_encoder(input_shape, base_model : keras.Model, num_contrastive_views=4):
     """
     Create a Siamese autoencoder model that applies the base model to multiple views of the input data.
     
