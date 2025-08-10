@@ -6,3 +6,4 @@ model_cache
 *.pdf
 plots/**
 venv/
+**/logs/

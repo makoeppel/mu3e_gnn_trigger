@@ -20,6 +20,10 @@ class GenerateMask(keras.layers.Layer):
         config = super().get_config()
         config.update({"padding_value": self.padding_value})
         return config
+    
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 class MaskOutput(keras.layers.Layer):

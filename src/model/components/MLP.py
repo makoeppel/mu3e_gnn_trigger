@@ -1,5 +1,6 @@
 import keras
 import tensorflow as tf
+from keras import regularizers
 
 class MLP(keras.layers.Layer):
     def __init__(
@@ -98,8 +99,14 @@ class MLP(keras.layers.Layer):
             "activation": self.activation,
             "hidden_activation": self.hidden_activation,
             "dropout_rate": self.dropout_rate,
+            "regularizer": regularizers.serialize(self.regularizer),
         })
         return config
+    
+    @classmethod
+    def from_config(cls, config):
+        config["regularizer"] = regularizers.deserialize(config["regularizer"])
+        return cls(**config)
 
     def count_params(self):
         return super().count_params() + sum(layer.count_params() for layer in self.layers_list)
