@@ -1,24 +1,27 @@
-import tensorflow as tf
 import keras
 import numpy as np
-import sys
+import tensorflow as tf
 import matplotlib.pyplot as plt
+import sklearn as sk
+import sys
 
 sys.path.append("../")
+ROOT_DIR = "~/mu3e_trigger"
+DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
+PLOTS_DIR = f"{ROOT_DIR}/plots"
+MODEL_DIR = f"{ROOT_DIR}/models"
 
-DATA_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger/mu3e_trigger_data"
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
 SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_mppc_spacetime.npy"
 BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_mppc_spacetime.npy"
+SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
+SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_mppc_spacetime.npy"
 
 bg_pixel_spacetime = np.load(BACKGROUND_PIXEL_FILE)
-sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
 bg_mppc_spacetime = np.load(BACKGROUND_MPPC_FILE)
+sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
 sig_mppc_spacetime = np.load(SIGNAL_MPPC_FILE)
-
-
-
 
 input_seq_len = bg_pixel_spacetime.shape[1]
 input_dim = bg_pixel_spacetime.shape[2]  # Exclude timestamp
@@ -164,14 +167,14 @@ model.fit(
             monitor="val_loss", patience=10, restore_best_weights=True
         )
     ],
-    class_weight = {label: np.mean(y_train == label) for label in np.unique(y_train)}
+    class_weight={label: np.mean(y_train == label) for label in np.unique(y_train)},
 )
 
 keras.Model.save(model, "classification_model.keras")
 
-hahatest_seq_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1) + (X_mppc_test != -1).all(
-    axis=-1
-).sum(axis=-1)
+hahatest_seq_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1) + (
+    X_mppc_test != -1
+).all(axis=-1).sum(axis=-1)
 test_mppc_length = (X_mppc_test != -1).all(axis=-1).sum(axis=-1)
 test_pixel_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1)
 train_mppc_length = (X_mppc_train != -1).all(axis=-1).sum(axis=-1)
@@ -224,7 +227,11 @@ seq_length_mlp.fit(
             monitor="val_loss", patience=10, restore_best_weights=True
         )
     ],
-    class_weight={label: np.sum(y_train == label) / len(y_train) for label in np.unique(y_train) if label in [0, 1]}
+    class_weight={
+        label: np.sum(y_train == label) / len(y_train)
+        for label in np.unique(y_train)
+        if label in [0, 1]
+    },
 )
 
 
@@ -234,25 +241,26 @@ test_seq_length = seq_length_mlp.predict([test_mppc_length, test_pixel_length])
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 
 fpr, tpr, thresholds = roc_curve(y_test, test_predictions)
-fpr_seq_length, tpr_seq_length, thresholds_seq_length = roc_curve(y_test, test_seq_length)
+fpr_seq_length, tpr_seq_length, thresholds_seq_length = roc_curve(
+    y_test, test_seq_length
+)
 roc_auc_seq_length = auc(fpr_seq_length, tpr_seq_length)
 roc_auc = auc(fpr, tpr)
 import matplotlib.pyplot as plt
 
-plt.figure(figsize=(8, 6))
-plt.plot(fpr, tpr, color="blue", label="ROC curve (area = {:.2f})".format(roc_auc))
-plt.plot(
+fig,ax = plt.subplots(figsize=(8, 6))
+ax.plot(fpr, tpr, color="blue", label="ROC curve (area = {:.2f})".format(roc_auc))
+ax.plot(
     fpr_seq_length,
     tpr_seq_length,
     color="green",
-    label="MLP trained on number of hits of MPPC and Pixels (area = {:.2f})".format(roc_auc_seq_length),
+    label="MLP trained on number of hits of MPPC and Pixels (area = {:.2f})".format(
+        roc_auc_seq_length
+    ),
 )
-plt.title("Signal only")
-plt.grid()
-plt.plot([0, 1], [0, 1], color="red", linestyle="--")
-plt.xlim([0.0, 1.0])
-plt.ylim([0.0, 1.05])
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.legend(loc="lower right")
-plt.savefig("roc_curve.png")
+ax.plot([0, 1], [0, 1], color="red", linestyle="--")
+ax.set_xlabel("False Positive Rate")
+ax.set_ylabel("True Positive Rate")
+ax.set_title("Receiver Operating Characteristic (ROC) Curve")
+ax.legend()
+fig.savefig(f"{PLOTS_DIR}/roc_curve.png")

@@ -6,8 +6,8 @@ import sklearn as sk
 import sys
 
 sys.path.append("../")
-ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
-DATA_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger/mu3e_trigger_data"
+ROOT_DIR = "~/mu3e_trigger"
+DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
 
@@ -19,8 +19,8 @@ SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
 SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_mppc_spacetime.npy"
 
 bg_pixel_spacetime = np.load(BACKGROUND_PIXEL_FILE)
-sig_only_pixel_spacetime = np.load(SIGNAL_ONLY_PIXEL_FILE)
 bg_mppc_spacetime = np.load(BACKGROUND_MPPC_FILE)
+sig_only_pixel_spacetime = np.load(SIGNAL_ONLY_PIXEL_FILE)
 sig_only_mppc_spacetime = np.load(SIGNAL_ONLY_MPPC_FILE)
 sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
 sig_mppc_spacetime = np.load(SIGNAL_MPPC_FILE)
@@ -42,7 +42,7 @@ from src.utils import ContrastSamples
     sig_only_pixel_spacetime,
     bg_mppc_spacetime,
     sig_only_mppc_spacetime,
-    num_samples=100000,
+    num_samples=200000,
     padding_value=-1,
 )
 
@@ -163,7 +163,6 @@ transformer_embedding = keras.Model(
 from src.model.wrapper.Siamese import make_siamese_encoder
 
 siamese_model = make_siamese_encoder(
-    input_shapes=[(seq_length, input_dim), (seq_length, input_dim)],
     base_model=transformer_embedding,
     num_contrastive_views=3,
 )
