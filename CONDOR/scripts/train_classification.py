@@ -6,8 +6,7 @@ import matplotlib.pyplot as plt
 
 sys.path.append("../")
 
-
-DATA_DIR = "../mu3e_trigger_data"
+DATA_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger/mu3e_trigger_data"
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
 SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_mppc_spacetime.npy"
