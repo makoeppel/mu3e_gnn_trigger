@@ -7,17 +7,16 @@ import sys
 
 sys.path.append("../")
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
-
 DATA_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger/mu3e_trigger_data"
+PLOTS_DIR = f"{ROOT_DIR}/plots"
+MODEL_DIR = f"{ROOT_DIR}/models"
+
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
 SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_mppc_spacetime.npy"
 BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_mppc_spacetime.npy"
 SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
 SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_mppc_spacetime.npy"
-
-PLOTS_DIR = f"{ROOT_DIR}/plots"
-MODEL_DIR = f"{ROOT_DIR}/models"
 
 bg_pixel_spacetime = np.load(BACKGROUND_PIXEL_FILE)
 sig_only_pixel_spacetime = np.load(SIGNAL_ONLY_PIXEL_FILE)
@@ -29,130 +28,7 @@ sig_mppc_spacetime = np.load(SIGNAL_MPPC_FILE)
 seq_length = bg_pixel_spacetime.shape[1]
 input_dim = bg_pixel_spacetime.shape[2]
 
-def ContrastSamples(
-    bg_pixel_spacetime,
-    sig_only_pixel_spacetime,
-    bg_mppc_spacetime,
-    sig_only_mppc_spacetime,
-    num_samples=1000,
-    padding_value=-1,
-):
-    base_pixel = np.full(
-        (num_samples, *bg_pixel_spacetime.shape[1:]), padding_value, dtype=np.float32
-    )
-    base_mppc = np.full(
-        (num_samples, *bg_pixel_spacetime.shape[1:]), padding_value, dtype=np.float32
-    )
-    contrast_pixel_signal = np.full(
-        (num_samples, *sig_only_pixel_spacetime.shape[1:]),
-        padding_value,
-        dtype=np.float32,
-    )
-    contrast_mppc_signal = np.full(
-        (num_samples, *sig_only_mppc_spacetime.shape[1:]),
-        padding_value,
-        dtype=np.float32,
-    )
-    contrast_pixel_background = np.full(
-        (num_samples, *bg_pixel_spacetime.shape[1:]), padding_value, dtype=np.float32
-    )
-    contrast_mppc_background = np.full(
-        (num_samples, *bg_mppc_spacetime.shape[1:]), padding_value, dtype=np.float32
-    )
-    bg_pixel_seq_length = (bg_pixel_spacetime != -1).all(axis=-1).sum(axis=-1).flatten()
-    bg_mppc_seq_length = (bg_mppc_spacetime != -1).all(axis=-1).sum(axis=-1).flatten()
-    sig_pixel_seq_length = (
-        (sig_only_pixel_spacetime != -1).all(axis=-1).sum(axis=-1).flatten()
-    )
-    sig_mppc_seq_length = (
-        (sig_only_mppc_spacetime != -1).all(axis=-1).sum(axis=-1).flatten()
-    )
-    bg_indices = np.arange(bg_pixel_spacetime.shape[0])
-    sig_indices = np.arange(sig_only_pixel_spacetime.shape[0])
-    selected_samples = 0
-    while selected_samples < num_samples:
-        bg_sample = np.random.choice(bg_indices, replace=False)
-        sig_sample = np.random.choice(sig_indices, replace=False)
-        pixel_length = bg_pixel_seq_length[bg_sample] + sig_pixel_seq_length[sig_sample]
-        mppc_length = bg_mppc_seq_length[bg_sample] + sig_mppc_seq_length[sig_sample]
-        if pixel_length <= base_pixel.shape[1] and mppc_length <= base_pixel.shape[1]:
-            smaller_bg_event = bg_indices[
-                (bg_pixel_seq_length < sig_pixel_seq_length[sig_sample])
-                & (bg_mppc_seq_length < sig_mppc_seq_length[sig_sample])
-            ]
-            if smaller_bg_event.size == 0:
-                continue
-            else:
-                smaller_bg_event = np.random.choice(smaller_bg_event, replace=False)
-            base_pixel[selected_samples, : (bg_pixel_seq_length[bg_sample])] = (
-                bg_pixel_spacetime[bg_sample][
-                    (bg_pixel_spacetime[bg_sample] != padding_value).all(axis=-1), :
-                ]
-            )
-            base_mppc[selected_samples, : (bg_mppc_seq_length[bg_sample])] = (
-                bg_mppc_spacetime[bg_sample][
-                    (bg_mppc_spacetime[bg_sample] != padding_value).all(axis=-1), :
-                ]
-            )
-            contrast_pixel_signal[
-                selected_samples, : (bg_pixel_seq_length[bg_sample])
-            ] = bg_pixel_spacetime[bg_sample][
-                (bg_pixel_spacetime[bg_sample] != padding_value).all(axis=-1), :
-            ]
-            contrast_mppc_signal[
-                selected_samples, : (bg_mppc_seq_length[bg_sample])
-            ] = bg_mppc_spacetime[bg_sample][
-                (bg_mppc_spacetime[bg_sample] != padding_value).all(axis=-1), :
-            ]
-            contrast_pixel_signal[
-                selected_samples, (bg_pixel_seq_length[bg_sample]) : (pixel_length)
-            ] = sig_only_pixel_spacetime[sig_sample][
-                (sig_only_pixel_spacetime[sig_sample] != padding_value).all(axis=-1), :
-            ]
-            contrast_mppc_signal[
-                selected_samples, (bg_mppc_seq_length[bg_sample]) : (mppc_length)
-            ] = sig_only_mppc_spacetime[sig_sample][
-                (sig_only_mppc_spacetime[sig_sample] != padding_value).all(axis=-1), :
-            ]
-
-            contrast_pixel_background[
-                selected_samples, : (bg_pixel_seq_length[smaller_bg_event])
-            ] = bg_pixel_spacetime[smaller_bg_event][
-                (bg_pixel_spacetime[smaller_bg_event] != padding_value).all(axis=-1), :
-            ]
-            contrast_mppc_background[
-                selected_samples, : (bg_mppc_seq_length[smaller_bg_event])
-            ] = bg_mppc_spacetime[smaller_bg_event][
-                (bg_mppc_spacetime[smaller_bg_event] != padding_value).all(axis=-1), :
-            ]
-            contrast_pixel_background[
-                selected_samples,
-                (bg_pixel_seq_length[smaller_bg_event]) : (
-                    bg_pixel_seq_length[smaller_bg_event]
-                    + bg_pixel_seq_length[bg_sample]
-                ),
-            ] = bg_pixel_spacetime[bg_sample][
-                (bg_pixel_spacetime[bg_sample] != padding_value).all(axis=-1), :
-            ]
-            contrast_mppc_background[
-                selected_samples,
-                (bg_mppc_seq_length[smaller_bg_event]) : (
-                    bg_mppc_seq_length[smaller_bg_event] + bg_mppc_seq_length[bg_sample]
-                ),
-            ] = bg_mppc_spacetime[bg_sample][
-                (bg_mppc_spacetime[bg_sample] != padding_value).all(axis=-1), :
-            ]
-
-            selected_samples += 1
-    return (
-        base_pixel,
-        base_mppc,
-        contrast_pixel_signal,
-        contrast_mppc_signal,
-        contrast_pixel_background,
-        contrast_mppc_background,
-    )
-
+from src.utils import ContrastSamples
 
 (
     base_pixel,
@@ -287,17 +163,17 @@ transformer_embedding = keras.Model(
 from src.model.wrapper.Siamese import make_siamese_encoder
 
 siamese_model = make_siamese_encoder(
-    input_shapes=[(seq_length, input_dim),(seq_length, input_dim)],
+    input_shapes=[(seq_length, input_dim), (seq_length, input_dim)],
     base_model=transformer_embedding,
-    num_contrastive_views=3
-    )
+    num_contrastive_views=3,
+)
 
 
 from src.training import TripletLoss
 
 siamese_model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-    loss=TripletLoss(margin=0.2),
+    loss=TripletLoss(margin=1.0),
 )
 
 siamese_model.fit(
@@ -310,7 +186,7 @@ siamese_model.fit(
         contrast_mppc_signal,
     ],
     y=np.zeros(contrast_mppc_signal.shape[0]),  # Dummy labels
-    validation_split = 0.2,
+    validation_split=0.2,
     epochs=30,
     batch_size=128,
 )
@@ -326,16 +202,10 @@ sig_pixel_train, sig_pixel_test, sig_mppc_train, sig_mppc_test = train_test_spli
     sig_pixel_spacetime, sig_mppc_spacetime, test_size=0.2, random_state=42
 )
 
-signal_latent = transformer_embedding.predict(
-    [sig_pixel_test, sig_mppc_test]
-)
-background_latent = transformer_embedding.predict(
-    [bg_pixel_test, bg_mppc_test]
-)
+signal_latent = transformer_embedding.predict([sig_pixel_test, sig_mppc_test])
+background_latent = transformer_embedding.predict([bg_pixel_test, bg_mppc_test])
 
 from src.evaluation import plot_latent_variable_distributions
 
-fig, axes = plot_latent_variable_distributions(
-    signal_latent,
-    background_latent)
+fig, axes = plot_latent_variable_distributions(signal_latent, background_latent)
 fig.savefig(f"{PLOTS_DIR}/latent_variable_distributions.png")
