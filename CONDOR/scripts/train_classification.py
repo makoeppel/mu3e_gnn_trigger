@@ -6,7 +6,7 @@ import sklearn as sk
 import sys
 
 sys.path.append("../")
-ROOT_DIR = "~/mu3e_trigger"
+ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
