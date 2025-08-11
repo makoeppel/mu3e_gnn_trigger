@@ -1,1 +1,1 @@
-from .Siamese import *
+from .siamese import *

@@ -1,6 +1,6 @@
 import tensorflow as tf
 import keras
-from .Losses import VarianceCovarianceLoss
+from .losses import VarianceCovarianceLoss
 
 class MultiObjectiveTrainer:
     """A trainer for multi-objective optimization of a fixed-size embedding encoder and autoencoder.

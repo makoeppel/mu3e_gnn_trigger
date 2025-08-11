@@ -1,3 +1,17 @@
+"""
+This module contains various attention block implementations for use in neural networks.
+The attention blocks include:
+- SelfAttentionBlock: A self-attention mechanism that allows the model to focus on different parts
+  of the input sequence.
+- SelfAttentionStack: A stack of self-attention blocks for deeper attention mechanisms.
+- MultiHeadAttentionBlock: A multi-head attention mechanism that allows the model to jointly attend
+  to information from different representation subspaces.
+- MultiHeadAttentionStack: A stack of multi-head attention blocks for more complex attention patterns.
+- PoolingAttentionBlock: An attention mechanism that pools information from a set of seed vectors.
+- InducedSetAttentionBlock: An attention mechanism that uses induced sets for efficient attention computation.
+- point_transformer: A transformer-like architecture for processing point cloud data.
+"""
+
 import keras
 import tensorflow as tf
 from keras import layers

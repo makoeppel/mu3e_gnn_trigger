@@ -109,4 +109,4 @@ class MLP(keras.layers.Layer):
         return cls(**config)
 
     def count_params(self):
-        return super().count_params() + sum(layer.count_params() for layer in self.layers_list)
+        return sum(layer.count_params() for layer in self.layers_list)
