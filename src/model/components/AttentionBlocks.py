@@ -302,7 +302,8 @@ class MultiHeadAttentionBlock(layers.Layer):
     def count_params(self):
         return (
             self.attention.count_params()
-            + self.ff_layer.count_params()
+            + self.ff_dense_1.count_params()
+            + self.ff_dense_2.count_params()
             + self.layer_norm.count_params()
             + self.dropout.count_params()
             + self.ff_dropout.count_params()
