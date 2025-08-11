@@ -3,17 +3,19 @@ import tensorflow as tf
 import numpy as np
 from .components import MLP
 
+
 class AutoEncoder(keras.Model):
-    def __init__(self, input_size : int = 32, latent_dim : int = 8, num_layers : int = 3, **kwargs):
+    def __init__(
+        self, input_size: int = 32, latent_dim: int = 8, num_layers: int = 3, **kwargs
+    ):
         super(AutoEncoder, self).__init__(**kwargs)
         self.input_size = input_size
         self.latent_dim = latent_dim
-        self.encoder = MLP(latent_dim, num_layers, activation='relu', name='encoder')
-        self.decoder = MLP(input_size, num_layers, activation='linear', name='decoder')
+        self.encoder = MLP(latent_dim, num_layers, activation="relu", name="encoder")
+        self.decoder = MLP(input_size, num_layers, activation="linear", name="decoder")
         input = keras.layers.Input(shape=(input_size,))
         encoded = self.encoder(input)
         decoded = self.decoder(encoded)
-
 
     def call(self, inputs):
         encoded = self.encoder(inputs)
@@ -22,6 +24,6 @@ class AutoEncoder(keras.Model):
 
     def encode(self, inputs):
         return self.encoder(inputs)
-    
+
     def decode(self, encoded):
         return self.decoder(encoded)

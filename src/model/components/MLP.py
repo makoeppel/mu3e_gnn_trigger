@@ -2,6 +2,7 @@ import keras
 import tensorflow as tf
 from keras import regularizers
 
+
 class MLP(keras.layers.Layer):
     def __init__(
         self,
@@ -11,10 +12,10 @@ class MLP(keras.layers.Layer):
         activation="linear",
         hidden_activation="relu",
         dropout_rate=0,
-        name = "mlp_dense",
+        name="mlp_dense",
         **kwargs,
     ):
-        self.regularizer = kwargs.pop('regularizer', None)
+        self.regularizer = kwargs.pop("regularizer", None)
         super().__init__(**kwargs)
         self.output_dim = output_dim
         self.num_layers = num_layers
@@ -34,10 +35,14 @@ class MLP(keras.layers.Layer):
         ]
         for i, width in enumerate(node_list):
             self.layers_list.append(
-                keras.layers.Dense(width, activation=self.hidden_activation, name=f"{self.name}_mlp_dense_{i}", 
-                                   kernel_regularizer=self.regularizer,
-                                   bias_regularizer=self.regularizer,
-                                   activity_regularizer=self.regularizer)
+                keras.layers.Dense(
+                    width,
+                    activation=self.hidden_activation,
+                    name=f"{self.name}_mlp_dense_{i}",
+                    kernel_regularizer=self.regularizer,
+                    bias_regularizer=self.regularizer,
+                    activity_regularizer=self.regularizer,
+                )
             )
             if i == 0:
                 input_shape_list.append((input_shape[:-1], input_dim))
@@ -45,40 +50,51 @@ class MLP(keras.layers.Layer):
                 input_shape_list.append((input_shape[:-1], node_list[i - 1]))
             if self.layer_norm:
                 self.layers_list.append(
-                    keras.layers.LayerNormalization(name=f"{self.name}_mlp_layer_norm_{i}")
+                    keras.layers.LayerNormalization(
+                        name=f"{self.name}_mlp_layer_norm_{i}"
+                    )
                 )
                 input_shape_list.append((input_shape[:-1], width))
             if self.dropout_rate > 0:
                 self.layers_list.append(
-                    keras.layers.Dropout(self.dropout_rate, name=f"{self.name}_mlp_dropout_{i}")
+                    keras.layers.Dropout(
+                        self.dropout_rate, name=f"{self.name}_mlp_dropout_{i}"
+                    )
                 )
                 input_shape_list.append((input_shape[:-1], width))
 
         self.layers_list.append(
-            keras.layers.Dense(self.output_dim, activation=self.activation, name=f"{self.name}_mlp_dense_output",
-                                kernel_regularizer=self.regularizer,
-                                   bias_regularizer=self.regularizer,
-                                   activity_regularizer=self.regularizer)
+            keras.layers.Dense(
+                self.output_dim,
+                activation=self.activation,
+                name=f"{self.name}_mlp_dense_output",
+                kernel_regularizer=self.regularizer,
+                bias_regularizer=self.regularizer,
+                activity_regularizer=self.regularizer,
+            )
         )
         input_shape_list.append((input_shape[:-1], node_list[-1]))
         if self.layer_norm:
             self.layers_list.append(
-                keras.layers.LayerNormalization(name=f"{self.name}_mlp_layer_norm_output")
+                keras.layers.LayerNormalization(
+                    name=f"{self.name}_mlp_layer_norm_output"
+                )
             )
             input_shape_list.append((input_shape[:-1], self.output_dim))
         if self.dropout_rate > 0:
             self.layers_list.append(
-                keras.layers.Dropout(self.dropout_rate, name=f"{self.name}_mlp_dropout_output")
+                keras.layers.Dropout(
+                    self.dropout_rate, name=f"{self.name}_mlp_dropout_output"
+                )
             )
             input_shape_list.append((input_shape[:-1], self.output_dim))
         # Build all layers
         for iter, layer in enumerate(self.layers_list):
             layer.build(input_shape_list[iter])
 
-
         super().build(input_shape)
 
-    def call(self, inputs,  training=None):
+    def call(self, inputs, training=None):
         x = inputs
         for layer in self.layers_list:
             if isinstance(layer, keras.layers.Dropout):
@@ -92,17 +108,19 @@ class MLP(keras.layers.Layer):
 
     def get_config(self):
         config = super().get_config()
-        config.update({
-            "output_dim": self.output_dim,
-            "num_layers": self.num_layers,
-            "layer_norm": self.layer_norm,
-            "activation": self.activation,
-            "hidden_activation": self.hidden_activation,
-            "dropout_rate": self.dropout_rate,
-            "regularizer": regularizers.serialize(self.regularizer),
-        })
+        config.update(
+            {
+                "output_dim": self.output_dim,
+                "num_layers": self.num_layers,
+                "layer_norm": self.layer_norm,
+                "activation": self.activation,
+                "hidden_activation": self.hidden_activation,
+                "dropout_rate": self.dropout_rate,
+                "regularizer": regularizers.serialize(self.regularizer),
+            }
+        )
         return config
-    
+
     @classmethod
     def from_config(cls, config):
         config["regularizer"] = regularizers.deserialize(config["regularizer"])

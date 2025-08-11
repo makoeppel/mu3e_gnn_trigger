@@ -20,7 +20,7 @@ class GenerateMask(keras.layers.Layer):
         config = super().get_config()
         config.update({"padding_value": self.padding_value})
         return config
-    
+
     @classmethod
     def from_config(cls, config):
         return cls(**config)
@@ -36,7 +36,9 @@ class MaskOutput(keras.layers.Layer):
             if mask.shape.rank == 2:
                 mask = tf.expand_dims(mask, axis=-1)
             mask = tf.broadcast_to(mask, tf.shape(inputs))
-            padding_tensor = tf.ones_like(inputs, dtype=inputs.dtype) * self.padding_value
+            padding_tensor = (
+                tf.ones_like(inputs, dtype=inputs.dtype) * self.padding_value
+            )
             inputs = tf.where(mask, inputs, padding_tensor)
         return inputs
 
@@ -49,7 +51,6 @@ class MaskOutput(keras.layers.Layer):
         return config
 
 
-
 class GetSequenceLength(keras.layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -57,7 +58,9 @@ class GetSequenceLength(keras.layers.Layer):
     def call(self, inputs):
         # Inputs expected to be mask of shape (batch_size, seq_len, 1)
         inputs = tf.cast(inputs, tf.float32)
-        return tf.reduce_sum(inputs, axis=1, keepdims=True)  # (batch_size, 1) if inputs has keepdims=True
+        return tf.reduce_sum(
+            inputs, axis=1, keepdims=True
+        )  # (batch_size, 1) if inputs has keepdims=True
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], 1)
@@ -77,8 +80,12 @@ class GenerateDecoderMask(keras.layers.Layer):
         Returns: Boolean mask of shape (batch_size, max_length, 1)
         """
         predicted_seq_length = tf.cast(tf.round(tf.reshape(inputs, [-1])), tf.int32)
-        predicted_seq_length = tf.clip_by_value(predicted_seq_length, 0, self.max_length)
-        mask = tf.sequence_mask(predicted_seq_length, maxlen=self.max_length, dtype=tf.bool)
+        predicted_seq_length = tf.clip_by_value(
+            predicted_seq_length, 0, self.max_length
+        )
+        mask = tf.sequence_mask(
+            predicted_seq_length, maxlen=self.max_length, dtype=tf.bool
+        )
         return mask
 
     def compute_output_shape(self, input_shape):

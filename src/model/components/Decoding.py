@@ -4,8 +4,8 @@ from keras import layers
 
 
 class DecoderQueries(layers.Layer):
-    def __init__(self, num_queries, feature_dim, learnable = False, **kwargs):
-        self.regularizer = kwargs.pop('regularizer', None)
+    def __init__(self, num_queries, feature_dim, learnable=False, **kwargs):
+        self.regularizer = kwargs.pop("regularizer", None)
         super(DecoderQueries, self).__init__(**kwargs)
         self.num_queries = num_queries
         self.feature_dim = feature_dim
@@ -17,7 +17,6 @@ class DecoderQueries(layers.Layer):
             name="queries",
         )
 
-
     def build(self, input_shape):
         super(DecoderQueries, self).build(input_shape)
 
@@ -28,21 +27,32 @@ class DecoderQueries(layers.Layer):
             [batch_size, self.num_queries, self.feature_dim],
         )
 
-
     def get_config(self):
         config = super(DecoderQueries, self).get_config()
-        config.update({
-            "num_queries": self.num_queries,
-            "feature_dim": self.feature_dim,
-        })
+        config.update(
+            {
+                "num_queries": self.num_queries,
+                "feature_dim": self.feature_dim,
+            }
+        )
         return config
-    
+
 
 class DecoderPoints(layers.Layer):
     """
     Generates a set of points evenly spaced in a given range.
     """
-    def __init__(self, num_points, feature_dim, range = [-1,1,], **kwargs):
+
+    def __init__(
+        self,
+        num_points,
+        feature_dim,
+        range=[
+            -1,
+            1,
+        ],
+        **kwargs
+    ):
         super(DecoderPoints, self).__init__(**kwargs)
         self.num_points = num_points
         self.feature_dim = feature_dim
@@ -63,11 +73,12 @@ class DecoderPoints(layers.Layer):
         )
         return points
 
-
     def get_config(self):
         config = super(DecoderPoints, self).get_config()
-        config.update({
-            "num_points": self.num_points,
-            "feature_dim": self.feature_dim,
-        })
+        config.update(
+            {
+                "num_points": self.num_points,
+                "feature_dim": self.feature_dim,
+            }
+        )
         return config

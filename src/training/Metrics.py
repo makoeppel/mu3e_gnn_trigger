@@ -1,6 +1,7 @@
 import keras
 import tensorflow as tf
 
+
 class ReconstructionQuality(keras.metrics.Metric):
     def __init__(self, name="reconstruction_quality", **kwargs):
         super().__init__(name=name, **kwargs)

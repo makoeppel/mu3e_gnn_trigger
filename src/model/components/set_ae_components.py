@@ -87,7 +87,8 @@ class SumOverSequenceLength(keras.layers.Layer):
             input_shape[0],
             1,
             input_shape[-1],
-        ) 
+        )
+
 
 class MaskedSetSorter(keras.layers.Layer):
     def __init__(self, **kwargs):
@@ -117,7 +118,7 @@ class MaskedSetSorter(keras.layers.Layer):
             mag = tf.where(mask, mag, tf.broadcast_to(large_val, tf.shape(mag)))
 
         # Sort by mag[..., 0]
-        sort_indices = tf.argsort(mag[:, :, 0], axis=1, direction='ASCENDING')  # [B, N]
+        sort_indices = tf.argsort(mag[:, :, 0], axis=1, direction="ASCENDING")  # [B, N]
         sorted_x = tf.gather(set_inputs, sort_indices, batch_dims=1)
 
         return sorted_x

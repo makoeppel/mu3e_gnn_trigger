@@ -81,14 +81,11 @@ class ChamferDistanceMasked(Loss):
         )
         chamfer_loss = loss_true + loss_pred
         return chamfer_loss
-    
 
 
 @keras.utils.register_keras_serializable(package="Custom", name="ChamferDistanceMasked")
 class ChamferDistance(Loss):
-    def __init__(
-        self, name="chamfer_distance", mode="cartesian"
-    ):
+    def __init__(self, name="chamfer_distance", mode="cartesian"):
         """
         padding_value: Value used to pad the input tensors.
         mode: Coordinate system for distance calculation.
@@ -143,12 +140,10 @@ class ChamferDistance(Loss):
 
         # Compute the loss
         loss_true = tf.reduce_mean(min_dist_true)  # Average over N
-        loss_pred = tf.reduce_mean(min_dist_pred)  # Average over M    
+        loss_pred = tf.reduce_mean(min_dist_pred)  # Average over M
 
         chamfer_loss = loss_true + loss_pred
         return chamfer_loss
-    
-
 
 
 class ChamferDistanceOutlierPunish(Loss):

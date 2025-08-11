@@ -22,6 +22,7 @@ import tensorflow as tf
 from tensorflow import keras
 from keras import layers, regularizers
 
+
 @keras.utils.register_keras_serializable(package="Custom")
 class SelfAttentionBlock(layers.Layer):
     def __init__(
@@ -95,23 +96,23 @@ class SelfAttentionBlock(layers.Layer):
 
         return ff_output
 
-
     def get_config(self):
         config = super().get_config()
-        config.update({
-            "num_heads": self.num_heads,
-            "key_dim": self.key_dim,
-            "dropout_rate": self.dropout_rate,
-            "ff_dim": self.ff_dim,
-            "name": self.name,
-            "regularizer": regularizers.serialize(self.regularizer),
-        })
+        config.update(
+            {
+                "num_heads": self.num_heads,
+                "key_dim": self.key_dim,
+                "dropout_rate": self.dropout_rate,
+                "ff_dim": self.ff_dim,
+                "name": self.name,
+                "regularizer": regularizers.serialize(self.regularizer),
+            }
+        )
         return config
-
 
     def build(self, input_shape):
         # build all child layers explicitly
-        self.attention.build(input_shape,input_shape)
+        self.attention.build(input_shape, input_shape)
         self.dropout1.build(input_shape)
         self.layer_norm_1.build(input_shape)
         self.ff_dense_1.build(input_shape)
@@ -119,7 +120,6 @@ class SelfAttentionBlock(layers.Layer):
         self.dropout2.build(input_shape)
         self.layer_norm_2.build(input_shape)
         super().build(input_shape)
-
 
     @classmethod
     def from_config(cls, config):
@@ -137,10 +137,18 @@ class SelfAttentionBlock(layers.Layer):
             + self.dropout2.count_params()
         )
 
+
 @keras.utils.register_keras_serializable(package="Custom")
 class SelfAttentionStack(layers.Layer):
     def __init__(
-        self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, ff_dim=None, regularizer = None ,**kwargs
+        self,
+        num_heads,
+        key_dim,
+        stack_size=3,
+        dropout_rate=0.0,
+        ff_dim=None,
+        regularizer=None,
+        **kwargs,
     ):
         super(SelfAttentionStack, self).__init__(**kwargs)
         self.regularizer = regularizer
@@ -173,14 +181,16 @@ class SelfAttentionStack(layers.Layer):
 
     def get_config(self):
         config = super().get_config()
-        config.update({
-            "num_heads": self.num_heads,
-            "key_dim": self.key_dim,
-            "stack_size": self.stack_size,
-            "dropout_rate": self.dropout_rate,
-            "ff_dim": self.ff_dim,
-            "regularizer": regularizers.serialize(self.regularizer),
-        })
+        config.update(
+            {
+                "num_heads": self.num_heads,
+                "key_dim": self.key_dim,
+                "stack_size": self.stack_size,
+                "dropout_rate": self.dropout_rate,
+                "ff_dim": self.ff_dim,
+                "regularizer": regularizers.serialize(self.regularizer),
+            }
+        )
         return config
 
     def build(self, input_shape):
@@ -199,7 +209,15 @@ class SelfAttentionStack(layers.Layer):
 
 
 class MultiHeadAttentionBlock(layers.Layer):
-    def __init__(self, num_heads, key_dim, dropout_rate=0.0, ff_dim=None, regularizer = None ,**kwargs):
+    def __init__(
+        self,
+        num_heads,
+        key_dim,
+        dropout_rate=0.0,
+        ff_dim=None,
+        regularizer=None,
+        **kwargs,
+    ):
 
         super(MultiHeadAttentionBlock, self).__init__(**kwargs)
         self.num_heads = num_heads
@@ -260,7 +278,6 @@ class MultiHeadAttentionBlock(layers.Layer):
         self.ff_layer_norm.build(query_shape)
         # Ensure the layer is built with the correct input shape
 
-
     def call(
         self,
         query,
@@ -303,11 +320,11 @@ class MultiHeadAttentionBlock(layers.Layer):
                 "dropout_rate": self.dropout_rate,
                 "ff_dim": self.ff_dim,
                 "regularizer": regularizers.serialize(self.regularizer),
-                "name": self.name if hasattr(self, 'name') else None,
+                "name": self.name if hasattr(self, "name") else None,
             }
         )
         return config
-    
+
     @classmethod
     def from_config(cls, config):
         config["regularizer"] = regularizers.deserialize(config["regularizer"])
@@ -327,7 +344,14 @@ class MultiHeadAttentionBlock(layers.Layer):
 
 class MultiHeadAttentionStack(layers.Layer):
     def __init__(
-        self, num_heads, key_dim, stack_size=3, dropout_rate=0.0, ff_dim=None, regularizer = None ,**kwargs
+        self,
+        num_heads,
+        key_dim,
+        stack_size=3,
+        dropout_rate=0.0,
+        ff_dim=None,
+        regularizer=None,
+        **kwargs,
     ):
 
         super(MultiHeadAttentionStack, self).__init__(**kwargs)
@@ -389,11 +413,11 @@ class MultiHeadAttentionStack(layers.Layer):
                 "ff_dim": self.ff_dim,
                 "stack_size": self.stack_size,
                 "regularizer": regularizers.serialize(self.regularizer),
-                "name": self.name if hasattr(self, 'name') else None,
+                "name": self.name if hasattr(self, "name") else None,
             }
         )
         return config
-    
+
     @classmethod
     def from_config(cls, config):
         config["regularizer"] = regularizers.deserialize(config["regularizer"])
@@ -411,7 +435,14 @@ class MultiHeadAttentionStack(layers.Layer):
 
 class PoolingAttentionBlock(layers.Layer):
     def __init__(
-        self, key_dim, num_seeds, num_heads=4, dropout_rate=0.0, ff_dim=None, regularizer = None , **kwargs
+        self,
+        key_dim,
+        num_seeds,
+        num_heads=4,
+        dropout_rate=0.0,
+        ff_dim=None,
+        regularizer=None,
+        **kwargs,
     ):
         super(PoolingAttentionBlock, self).__init__(**kwargs)
         self.key_dim = key_dim
@@ -511,11 +542,11 @@ class PoolingAttentionBlock(layers.Layer):
                 "dropout_rate": self.dropout_rate,
                 "ff_dim": self.ff_dim,
                 "regularizer": regularizers.serialize(self.regularizer),
-                "name": self.name if hasattr(self, 'name') else None,
+                "name": self.name if hasattr(self, "name") else None,
             }
         )
         return config
-    
+
     @classmethod
     def from_config(cls, config):
         config["regularizer"] = regularizers.deserialize(config["regularizer"])

@@ -2,6 +2,7 @@ import tensorflow as tf
 import keras
 from .losses import VarianceCovarianceLoss
 
+
 class MultiObjectiveTrainer:
     """A trainer for multi-objective optimization of a fixed-size embedding encoder and autoencoder.
 
@@ -41,14 +42,18 @@ class MultiObjectiveTrainer:
             else keras.losses.MeanSquaredError()
         )
         self.variance_loss = (
-            variance_loss if variance_loss is not None else VarianceCovarianceLoss(cov_penalty= 0.1)
+            variance_loss
+            if variance_loss is not None
+            else VarianceCovarianceLoss(cov_penalty=0.1)
         )
         self.lambda_var = lambda_var
 
         self.batch_size = batch_size
 
     @tf.function
-    def train_encoder_step(self, dataset: tf.data.Dataset, encoder_optimizer, validation_dataset=None):
+    def train_encoder_step(
+        self, dataset: tf.data.Dataset, encoder_optimizer, validation_dataset=None
+    ):
         """Train the encoder using the reconstruction loss and variance loss.
         Args:
             dataset (tf.data.Dataset): Dataset containing input samples.
@@ -73,7 +78,9 @@ class MultiObjectiveTrainer:
                 loss = recon_loss + self.lambda_var * var_loss
 
             grads = tape.gradient(loss, self.encoder.trainable_variables)
-            encoder_optimizer.apply_gradients(zip(grads, self.encoder.trainable_variables))
+            encoder_optimizer.apply_gradients(
+                zip(grads, self.encoder.trainable_variables)
+            )
 
             total_recon_loss += recon_loss
             total_var_loss += var_loss
@@ -85,7 +92,10 @@ class MultiObjectiveTrainer:
 
     @tf.function
     def train_autoencoder_step(
-        self, dataset: tf.data.Dataset, ae_optimizer: keras.optimizers.Optimizer, num_steps = 5
+        self,
+        dataset: tf.data.Dataset,
+        ae_optimizer: keras.optimizers.Optimizer,
+        num_steps=5,
     ):
         """Train the autoencoder using the latent representations from the encoder.
         Args:
@@ -109,7 +119,9 @@ class MultiObjectiveTrainer:
                     recon_loss = self.autoencoder_loss(z, z_hat)
 
                 grads = tape.gradient(recon_loss, self.autoencoder.trainable_variables)
-                ae_optimizer.apply_gradients(zip(grads, self.autoencoder.trainable_variables))
+                ae_optimizer.apply_gradients(
+                    zip(grads, self.autoencoder.trainable_variables)
+                )
 
                 total_recon_loss += recon_loss
                 num_batches += 1
@@ -139,7 +151,9 @@ class MultiObjectiveTrainer:
                 loss = self.lambda_var * var_loss
 
             grads = tape.gradient(loss, self.encoder.trainable_variables)
-            encoder_optimizer.apply_gradients(zip(grads, self.encoder.trainable_variables))
+            encoder_optimizer.apply_gradients(
+                zip(grads, self.encoder.trainable_variables)
+            )
 
             total_var_loss += var_loss
             num_batches += 1
@@ -147,9 +161,10 @@ class MultiObjectiveTrainer:
         mean_var_loss = total_var_loss / tf.cast(num_batches, tf.float32)
         return mean_var_loss
 
-
     @tf.function
-    def train_reconstruction_step(self, dataset: tf.data.Dataset, encoder_optimizer, validation_dataset=None):
+    def train_reconstruction_step(
+        self, dataset: tf.data.Dataset, encoder_optimizer, validation_dataset=None
+    ):
         """Train the encoder using reconstruction loss only.
         Args:
             dataset (tf.data.Dataset): Dataset containing input samples.
@@ -172,7 +187,9 @@ class MultiObjectiveTrainer:
                 loss = recon_loss
 
             grads = tape.gradient(loss, self.encoder.trainable_variables)
-            encoder_optimizer.apply_gradients(zip(grads, self.encoder.trainable_variables))
+            encoder_optimizer.apply_gradients(
+                zip(grads, self.encoder.trainable_variables)
+            )
 
             total_recon_loss += recon_loss
             num_batches += 1
