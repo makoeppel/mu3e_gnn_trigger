@@ -37,10 +37,10 @@ from src.model.components import (
     MultiHeadAttentionStack,
 )
 
-feature_dim = 4
+feature_dim = 16
 latent_dim = 16
 num_heads = 8
-num_seeds = 4
+num_seeds = 1
 
 pixel_mask = GenerateMask(-1, name="pixel_mask")(pixel_input)
 mppc_mask = GenerateMask(-1, name="mppc_mask")(mppc_input)
@@ -246,9 +246,8 @@ fpr_seq_length, tpr_seq_length, thresholds_seq_length = roc_curve(
 )
 roc_auc_seq_length = auc(fpr_seq_length, tpr_seq_length)
 roc_auc = auc(fpr, tpr)
-import matplotlib.pyplot as plt
 
-fig,ax = plt.subplots(figsize=(8, 6))
+fig, ax = plt.subplots(figsize=(8, 6))
 ax.plot(fpr, tpr, color="blue", label="ROC curve (area = {:.2f})".format(roc_auc))
 ax.plot(
     fpr_seq_length,

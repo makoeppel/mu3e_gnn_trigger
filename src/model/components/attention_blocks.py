@@ -19,7 +19,6 @@ from . import MLP
 
 
 import tensorflow as tf
-from tensorflow import keras
 from keras import layers, regularizers
 
 
@@ -38,8 +37,7 @@ class SelfAttentionBlock(layers.Layer):
         super().__init__(**kwargs)
         self.num_heads = num_heads
         self.key_dim = key_dim
-        self.name = name
-        self.regularizer = regularizers.get(regularizer) if regularizer else None
+        self.regularizer = regularizer
         self.dropout_rate = dropout_rate
         self.ff_dim = ff_dim or key_dim * 2
 
@@ -83,18 +81,21 @@ class SelfAttentionBlock(layers.Layer):
         self.supports_masking = True
 
     def call(self, inputs, mask=None, training=None):
+
         attention_output = self.attention(
-            inputs, inputs, query_mask=mask, key_mask=mask
+            inputs, inputs, key_mask=mask, query_mask=mask
         )
-        attention_output = self.dropout1(attention_output, training=training)
-        attention_output = self.layer_norm_1(inputs + attention_output)
+        attention_dropout = self.dropout1(attention_output, training=training)
+        attention_output_norm_1 = self.layer_norm_1(inputs + attention_dropout)
 
-        ff_output = self.ff_dense_1(attention_output)
-        ff_output = self.ff_dense_2(ff_output)
-        ff_output = self.dropout2(ff_output, training=training)
-        ff_output = self.layer_norm_2(attention_output + ff_output)
+        ff_output_dense_1 = self.ff_dense_1(attention_output_norm_1)
+        ff_output_dense_2 = self.ff_dense_2(ff_output_dense_1)
+        ff_output_dense_dropout = self.dropout2(ff_output_dense_2, training=training)
+        ff_output_norm = self.layer_norm_2(
+            attention_output_norm_1 + ff_output_dense_dropout
+        )
 
-        return ff_output
+        return ff_output_norm
 
     def get_config(self):
         config = super().get_config()
@@ -125,6 +126,9 @@ class SelfAttentionBlock(layers.Layer):
     def from_config(cls, config):
         config["regularizer"] = regularizers.deserialize(config["regularizer"])
         return cls(**config)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
 
     def count_params(self):
         return (
@@ -218,7 +222,6 @@ class MultiHeadAttentionBlock(layers.Layer):
         regularizer=None,
         **kwargs,
     ):
-
         super(MultiHeadAttentionBlock, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.key_dim = key_dim
@@ -286,7 +289,6 @@ class MultiHeadAttentionBlock(layers.Layer):
         key_mask=None,
         value_mask=None,
         query_mask=None,
-        attention_mask=None,
         training=None,
     ):
         if key is None:
@@ -296,9 +298,9 @@ class MultiHeadAttentionBlock(layers.Layer):
             query,
             value,
             key,
-            attention_mask=attention_mask,
-            query_mask=query_mask,
             key_mask=key_mask,
+            value_mask=value_mask,
+            query_mask=query_mask,
         )
         attention_output = self.dropout(attention_output, training=training)
         attention_output = self.layer_norm(attention_output + query)
@@ -383,7 +385,6 @@ class MultiHeadAttentionStack(layers.Layer):
         key_mask=None,
         value_mask=None,
         query_mask=None,
-        attention_mask=None,
         training=None,
     ):
         x = query
@@ -395,7 +396,6 @@ class MultiHeadAttentionStack(layers.Layer):
                 key_mask=key_mask,
                 value_mask=value_mask,
                 query_mask=query_mask,
-                attention_mask=attention_mask,
                 training=training,
             )
         return x
@@ -434,6 +434,14 @@ class MultiHeadAttentionStack(layers.Layer):
 
 
 class PoolingAttentionBlock(layers.Layer):
+    """
+    Set Transformer style Pooling by Multihead Attention (PMA)
+    Based on equation (11): PMA_k(Z) = MAB(S, rFF(Z))
+
+    Since MultiHeadAttentionBlock already implements MAB with feed-forward,
+    this layer focuses on the PMA structure.
+    """
+
     def __init__(
         self,
         key_dim,
@@ -449,84 +457,98 @@ class PoolingAttentionBlock(layers.Layer):
         self.num_seeds = num_seeds
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
-        self.ff_dim = ff_dim
         self.regularizer = regularizer
 
+        # Learnable seed vectors (S in the paper)
         self.seed_vectors = self.add_weight(
             shape=(num_seeds, key_dim),
-            initializer="random_normal",
+            initializer=tf.keras.initializers.GlorotUniform(),  # Better than random_normal
             trainable=True,
             name="seed_vectors",
             regularizer=self.regularizer,
         )
-        if ff_dim is None:
-            ff_dim = key_dim * 2
 
-        self.ff_layer = keras.Sequential(
-            [
-                layers.Dense(
-                    ff_dim,
-                    activation="relu",
-                    name="ffn_dense_1",
-                    kernel_regularizer=self.regularizer,
-                    bias_regularizer=self.regularizer,
-                    activity_regularizer=self.regularizer,
-                ),
-                layers.Dense(
-                    key_dim,
-                    name="ffn_dense_2",
-                    kernel_regularizer=self.regularizer,
-                    bias_regularizer=self.regularizer,
-                    activity_regularizer=self.regularizer,
-                ),
-            ],
-            name="ffn_layer",
+        if ff_dim is None:
+            self.ff_dim = key_dim * 2
+        else:
+            self.ff_dim = ff_dim
+
+        # Pre-processing feed-forward for inputs (rFF(Z) in equation 11)
+        self.input_ff_1 = layers.Dense(
+            self.ff_dim,
+            activation="relu",
+            name="input_ff_1",
+            kernel_regularizer=self.regularizer,
+            bias_regularizer=self.regularizer,
         )
+        self.input_ff_2 = layers.Dense(
+            key_dim,
+            name="input_ff_2",
+            kernel_regularizer=self.regularizer,
+            bias_regularizer=self.regularizer,
+        )
+
+        # Use your MultiHeadAttentionBlock which already implements MAB
         self.MHA = MultiHeadAttentionBlock(
             num_heads=num_heads,
             key_dim=key_dim,
             dropout_rate=dropout_rate,
-            name="pooling_attention_mha",
-            regularizer=self.regularizer,
             ff_dim=ff_dim,
+            regularizer=self.regularizer,
+            name="pooling_mha",
         )
 
     def build(self, input_shape):
         super(PoolingAttentionBlock, self).build(input_shape)
-        seed_vectors_shape = (None, self.num_seeds, self.key_dim)
 
         if len(input_shape) != 3:
             raise ValueError(
-                f"Expected input shape (batch_size, num_points, key_dim). Got {input_shape}."
+                f"Expected input shape (batch_size, seq_len, features). Got {input_shape}."
             )
 
-        value_shape = (None, input_shape[1], self.key_dim)
+        if input_shape[-1] != self.key_dim:
+            raise ValueError(
+                f"Input feature dimension {input_shape[-1]} must match key_dim {self.key_dim}"
+            )
 
-        self.ff_layer.build(input_shape)
-        self.MHA.build(seed_vectors_shape, value_shape)
-        # Ensure the layer is built with the correct input shape
-        if isinstance(input_shape, list):
-            input_shape = input_shape[0]
-        self.input_spec = layers.InputSpec(shape=input_shape)
+        # Build the components
+        seed_shape = (None, self.num_seeds, self.key_dim)
+        processed_input_shape = (None, input_shape[1], self.key_dim)
 
-    def call(self, inputs, mask=None, training=None):
-        # inputs: (batch_size, num_points, key_dim)
+        self.input_ff_1.build(input_shape)
+        self.input_ff_2.build((*input_shape[:-1], self.ff_dim))
+        self.MHA.build(seed_shape, processed_input_shape)
+
+    def call(self, inputs, mask=None):
+        """
+        Implements PMA_k(Z) = MAB(S, rFF(Z)) from Set Transformer paper
+
+        Args:
+            inputs: (batch_size, seq_len, key_dim)
+            mask: (batch_size, seq_len) boolean mask for inputs
+
+        Returns:
+            output: (batch_size, num_seeds, key_dim)
+        """
         batch_size = tf.shape(inputs)[0]
 
-        # Expand seed vectors to match batch size and number of points
+        processed_inputs = self.input_ff_1(inputs)
+        processed_inputs = self.input_ff_2(processed_inputs)
+
         seed_vectors_expanded = tf.broadcast_to(
             self.seed_vectors[tf.newaxis, ...],
             [batch_size, self.num_seeds, self.key_dim],
         )
-        # Apply feed-forward layer to seed vectors
-        ff_inputs = self.ff_layer(inputs)
-        # Apply MultiHeadAttention
+
+        # Step 3: MAB(S, rFF(Z)) using your MultiHeadAttentionBlock
+        # Query: seed vectors, Key/Value: processed inputs
         output = self.MHA(
             query=seed_vectors_expanded,
-            value=ff_inputs,
-            key=ff_inputs,
+            value=processed_inputs,
+            key=processed_inputs,
             key_mask=mask,
         )
+
         return output
 
     def compute_output_shape(self, input_shape):
@@ -542,7 +564,6 @@ class PoolingAttentionBlock(layers.Layer):
                 "dropout_rate": self.dropout_rate,
                 "ff_dim": self.ff_dim,
                 "regularizer": regularizers.serialize(self.regularizer),
-                "name": self.name if hasattr(self, "name") else None,
             }
         )
         return config
@@ -554,8 +575,10 @@ class PoolingAttentionBlock(layers.Layer):
 
     def count_params(self):
         return (
-            self.MHA.count_params()
-            + self.seed_vectors.shape[0] * self.seed_vectors.shape[1]
+            self.seed_vectors.shape[0] * self.seed_vectors.shape[1]
+            + self.input_ff_1.count_params()
+            + self.input_ff_2.count_params()
+            + self.MHA.count_params()
         )
 
 
