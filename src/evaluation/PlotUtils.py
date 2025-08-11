@@ -1,22 +1,47 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def plot_latent_variable_distributions(bg_log_var, sig_log_var, **kwargs):
+
+def plot_latent_variable_distributions(
+    bg_log_var, sig_log_var, **kwargs
+) -> tuple[plt.Figure, np.ndarray[plt.Axes]]:
+    """
+    Plots the distributions of latent variables for background and signal data.
+
+    Args:
+        bg_log_var (np.ndarray): Background log variance array.
+        sig_log_var (np.ndarray): Signal log variance array.
+        kwargs: Additional keyword arguments for customization, such as:
+            - x_label (str): Label for the x-axis.
+            - n_bins (int): Number of bins for the histogram.
+            - y_label (str): Label for the y-axis.
+            - signal_label (str): Label for the signal data in the legend.
+            - background_label (str): Label for the background data in the legend.
+
+    Returns:
+        fig: The matplotlib figure object.
+        ax_array: The array of axes used for plotting.
+    """
     if bg_log_var.ndim == 2 or sig_log_var.ndim == 2:
         if bg_log_var.shape[1] != sig_log_var.shape[1]:
-            raise ValueError("Background and signal log variance arrays must have the same number of variables.")
-
+            raise ValueError(
+                "Background and signal log variance arrays must have the same number of variables."
+            )
 
         num_variables = bg_log_var.shape[1]
     elif bg_log_var.ndim == 1 and sig_log_var.ndim == 1:
         num_variables = 1
     else:
-        raise ValueError(f"Input arrays must be 2D or 1D. Got shapes {bg_log_var.shape} and {sig_log_var.shape}.")
+        raise ValueError(
+            f"Input arrays must be 2D or 1D. Got shapes {bg_log_var.shape} and {sig_log_var.shape}."
+        )
 
     num_cols = np.ceil(np.sqrt(num_variables)).astype(int)
 
     num_rows = (num_variables + num_cols - 1) // num_cols  # Calculate rows needed
-    fig, ax_array = plt.subplots(figsize=(num_cols * 3.5, num_rows * 2.5), nrows=num_rows, ncols=num_cols)
+    fig, ax_array = plt.subplots(
+        figsize=(num_cols * 3.5, num_rows * 2.5), nrows=num_rows, ncols=num_cols
+    )
     ax_array = ax_array.flatten()  # Flatten the axes array for easier indexing
 
     x_label = kwargs.get("x_label", "$\\sigma$")
@@ -60,7 +85,6 @@ def plot_latent_variable_distributions(bg_log_var, sig_log_var, **kwargs):
         fig.delaxes(ax_array[j])
 
     handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol = 2)
+    fig.legend(handles, labels, loc="upper center", ncol=2)
     fig.tight_layout()
     return fig, ax_array.reshape((num_rows, num_cols))
-
