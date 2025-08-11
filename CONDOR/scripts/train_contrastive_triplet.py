@@ -6,8 +6,9 @@ import sklearn as sk
 import sys
 
 sys.path.append("../")
+ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 
-DATA_DIR = "../mu3e_trigger_data"
+DATA_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger/mu3e_trigger_data"
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
 SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_mppc_spacetime.npy"
@@ -15,6 +16,8 @@ BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_mppc_spacetime.npy"
 SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
 SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_mppc_spacetime.npy"
 
+PLOTS_DIR = f"{ROOT_DIR}/plots"
+MODEL_DIR = f"{ROOT_DIR}/models"
 
 bg_pixel_spacetime = np.load(BACKGROUND_PIXEL_FILE)
 sig_only_pixel_spacetime = np.load(SIGNAL_ONLY_PIXEL_FILE)
@@ -188,9 +191,9 @@ from src.model.components import (
 feature_dim = 8
 latent_dim = 16
 num_heads = 8
-num_seeds = 8
+num_seeds = 4
 regularizer = keras.regularizers.l2(1e-4)
-dropout_rate = 0.1
+dropout_rate = 0.05
 
 pixel_mask = GenerateMask(-1, name="pixel_mask")(pixel_input)
 mppc_mask = GenerateMask(-1, name="mppc_mask")(mppc_input)
@@ -312,7 +315,7 @@ siamese_model.fit(
     batch_size=128,
 )
 
-transformer_embedding.save("transformer_embedding.keras")
+transformer_embedding.save(f"{MODEL_DIR}/transformer_embedding.keras")
 
 from sklearn.model_selection import train_test_split
 
@@ -332,6 +335,7 @@ background_latent = transformer_embedding.predict(
 
 from src.evaluation import plot_latent_variable_distributions
 
-plot_latent_variable_distributions(
+fig, axes = plot_latent_variable_distributions(
     signal_latent,
     background_latent)
+fig.savefig(f"{PLOTS_DIR}/latent_variable_distributions.png")
