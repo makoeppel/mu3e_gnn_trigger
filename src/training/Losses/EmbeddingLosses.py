@@ -271,20 +271,30 @@ class EmbeddingSpaceSpreading(keras.losses.Loss):
         )
 
 
-class TripletLoss(keras.losses.Loss):
-    """Triplet loss for training models with multiple views.
-    This loss computes the triplet loss between anchor, positive, and negative samples.
-    Args:
-        margin (float): Margin for the triplet loss.
-        **kwargs: Additional keyword arguments for the base class.
-    """
-
-    def __init__(self, margin=1.0, **kwargs):
+class TripletLoss(tf.keras.losses.Loss):
+    def __init__(self, margin=1.0, normalize=True, **kwargs):
         super().__init__(**kwargs)
         self.margin = margin
+        self.normalize = normalize
 
     def call(self, _, y_pred):
         anchor, positive, negative = tf.split(y_pred, 3, axis=-1)
+
+        if self.normalize:
+            anchor = tf.math.l2_normalize(anchor, axis=-1)
+            positive = tf.math.l2_normalize(positive, axis=-1)
+            negative = tf.math.l2_normalize(negative, axis=-1)
+
         pos_dist = tf.reduce_sum(tf.square(anchor - positive), axis=-1)
         neg_dist = tf.reduce_sum(tf.square(anchor - negative), axis=-1)
-        return tf.reduce_mean(tf.maximum(pos_dist - neg_dist + self.margin, 0.0))
+
+        loss = tf.nn.relu(pos_dist - neg_dist + self.margin)
+        return tf.reduce_mean(loss)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'margin': self.margin,
+            'normalize': self.normalize
+        })
+        return config
