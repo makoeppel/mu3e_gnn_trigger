@@ -160,7 +160,7 @@ transformer_embedding = keras.Model(
     name="contrastive_learning_model",
 )
 
-from src.model.wrapper.Siamese import make_siamese_encoder
+from src.model.wrapper.siamese import make_siamese_encoder
 
 siamese_model = make_siamese_encoder(
     base_model=transformer_embedding,
