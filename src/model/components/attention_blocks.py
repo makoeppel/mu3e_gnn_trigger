@@ -181,9 +181,6 @@ class MultiHeadAttentionBlock(layers.Layer):
             key_value_shape = input_shape
 
         # Build layers
-        print(
-            f"Building MultiHeadAttentionBlock with query shape: {query_shape}, key_value shape: {key_value_shape}"
-        )
         self.ln_q.build(query_shape)
         if self.ln_kv is not None:
             self.ln_kv.build(key_value_shape)
@@ -330,7 +327,7 @@ class SelfAttentionStack(layers.Layer):
                 pre_ln=pre_ln,
                 regularizer=regularizer,
             )
-            for i in range(stack_size)  # Example: 2 attention blocks
+            for i in range(stack_size)
         ]
         self.supports_masking = True
 
