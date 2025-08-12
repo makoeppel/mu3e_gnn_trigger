@@ -29,111 +29,91 @@ input_dim = bg_pixel_spacetime.shape[2]  # Exclude timestamp
 pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
 mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
 
+
 from src.model.components import (
-    SelfAttentionStack,
-    MLP,
-    GenerateMask,
-    PoolingAttentionBlock,
     MultiHeadAttentionStack,
+    MultiHeadAttentionBlock,
+    SelfAttentionStack,
+    SelfAttentionBlock,
+    PoolingAttentionBlock,
+    GenerateMask,
+    MLP,
 )
 
-feature_dim = 16
-latent_dim = 16
-num_heads = 8
-num_seeds = 1
+feature_dim = 8
+num_heads = 4
+dropout_rate = 0
 
-pixel_mask = GenerateMask(-1, name="pixel_mask")(pixel_input)
-mppc_mask = GenerateMask(-1, name="mppc_mask")(mppc_input)
+pixel_mask = GenerateMask(name="mask")(pixel_input)
+pixel_embedding = MLP(
+    num_layers=4,
+    output_dim=feature_dim,
+    activation="relu",
+    name="input_embedding",
+    dropout_rate=dropout_rate,
+)(pixel_input)
 
-pixel_embedding = MLP(output_dim=feature_dim, name="pixel_embedding")(pixel_input)
-
-mppc_embedding = MLP(output_dim=feature_dim, name="mppc_embedding")(mppc_input)
-
-pixel_attention = SelfAttentionStack(
+pixel_self_attention = MultiHeadAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size=3,
-    name="pixel_attention",
-)(pixel_embedding, pixel_mask)
+    stack_size = 3,
+    name="self_attention",
+    dropout_rate=dropout_rate,
+    self_attention=True,
+    pre_ln=True,
+)(pixel_embedding,pixel_embedding , query_mask = pixel_mask, value_mask=pixel_mask)
+pixel_pooling = PoolingAttentionBlock(
+    num_seeds = 1,
+    key_dim=feature_dim,
+    name="pooling_attention",
+    dropout_rate=dropout_rate,
+)(pixel_self_attention, mask=pixel_mask)
 
-mppc_attention = SelfAttentionStack(
+mppc_mask = GenerateMask(name="mppc_mask")(mppc_input)
+mppc_embedding = MLP(
+    num_layers=4,
+    output_dim=feature_dim,
+    activation="relu",
+    name="mppc_embedding",
+    dropout_rate=dropout_rate,
+)(mppc_input)
+mppc_self_attention = MultiHeadAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size=3,
-    name="mppc_attention",
-)(mppc_embedding, mppc_mask)
-
-mppc_attend_pixel = MultiHeadAttentionStack(
-    num_heads=num_heads,
+    stack_size = 3,
+    name="mppc_self_attention",
+    dropout_rate=dropout_rate,
+    self_attention=True,
+    pre_ln=True,
+)(mppc_embedding,mppc_embedding , query_mask = mppc_mask, value_mask=mppc_mask)
+mppc_pooling = PoolingAttentionBlock(
+    num_seeds = 1,
     key_dim=feature_dim,
-    stack_size=2,
-    name="mppc_attend_pixel",
-)(
-    query=mppc_attention,
-    value=pixel_attention,
-    query_mask=mppc_mask,
-    value_mask=pixel_mask,
-    key_mask=pixel_mask,
-)
+    name="mppc_pooling_attention",
+    dropout_rate=dropout_rate,
+)(mppc_self_attention, mask=mppc_mask)
 
-pixel_attend_mppc = MultiHeadAttentionStack(
-    num_heads=num_heads,
-    key_dim=feature_dim,
-    stack_size=2,
-    name="pixel_attend_mppc",
-)(
-    query=pixel_attention,
-    value=mppc_attention,
-    query_mask=pixel_mask,
-    value_mask=mppc_mask,
-    key_mask=mppc_mask,
-)
 
-pixel_attentions_pool = PoolingAttentionBlock(
-    name="pixel_attentions_pool",
-    key_dim=feature_dim,
-    num_seeds=num_seeds,
-    num_heads=num_heads,
-)(pixel_attend_mppc, pixel_mask)
-
-pixel_flattened_pool = keras.layers.Flatten(name="pixel_flattened_pool")(
-    pixel_attentions_pool
-)
-
-mppc_attentions_pool = PoolingAttentionBlock(
-    name="mppc_attentions_pool",
-    key_dim=feature_dim,
-    num_seeds=num_seeds,
-    num_heads=num_heads,
-)(mppc_attend_pixel, mppc_mask)
-
-mppc_flattened_pool = keras.layers.Flatten(name="mppc_flattened_pool")(
-    mppc_attentions_pool
-)
-
-latent_space = keras.layers.Concatenate(name="latent_space")(
-    [
-        pixel_flattened_pool,
-        mppc_flattened_pool,
-    ]
-)
-
-output = MLP(num_layers=5, output_dim=1, activation="sigmoid", name="output")(
-    latent_space
-)
+latent_space = keras.layers.Concatenate(name="latent_space")([pixel_pooling, mppc_pooling])
+latent_space = keras.layers.Flatten(name="flatten")(latent_space)
+output = MLP(
+    num_layers=4,
+    output_dim=1,
+    activation="sigmoid",
+    name="output",
+    dropout_rate=dropout_rate,
+)(latent_space)
 
 model = keras.Model(
     inputs=[pixel_input, mppc_input],
     outputs=output,
     name="ClassificationModel",
 )
-
 model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+    optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-5),
     loss=keras.losses.BinaryCrossentropy(),
     metrics=[keras.metrics.BinaryAccuracy()],
 )
-
 
 from sklearn.model_selection import train_test_split
 

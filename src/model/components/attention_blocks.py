@@ -22,6 +22,199 @@ import tensorflow as tf
 from keras import layers, regularizers
 
 
+@tf.keras.utils.register_keras_serializable(package="Custom", name="AttentionBlock")
+class MultiHeadAttentionBlock(layers.Layer):
+    def __init__(
+        self,
+        num_heads,
+        key_dim,
+        ff_dim,
+        dropout_rate=0,
+        self_attention=False,
+        pre_ln=True,  # "pre" or "post"
+        regularizer=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.self_attention = self_attention
+        self.pre_ln = pre_ln
+        self.regularizer = regularizer
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.ff_dim = ff_dim or key_dim * 4
+        self.dropout_rate = dropout_rate
+
+        # LayerNorms
+        self.ln_q = layers.LayerNormalization(epsilon=1e-6, name="ln_q")
+        self.ln_kv = (
+            layers.LayerNormalization(epsilon=1e-6)
+            if not self_attention and pre_ln
+            else None
+        )
+        self.ln_ffn = (
+            layers.LayerNormalization(epsilon=1e-6, name="ln_ffn") if pre_ln else None
+        )
+
+        # Attention
+        self.attn = layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            dropout=dropout_rate,
+            name="multi_head_attention",
+        )
+        self.dropout_attn = layers.Dropout(dropout_rate, name="dropout_attn")
+
+        # Feedforward network
+        self.ffn_dense_1 = layers.Dense(
+            self.ff_dim,
+            activation="gelu",
+            name="ffn_dense_1",
+            kernel_initializer="glorot_uniform",
+            bias_initializer="zeros",
+        )
+        self.ffn_dense_2 = layers.Dense(
+            key_dim,
+            name="ffn_dense_2",
+            kernel_initializer="glorot_uniform",
+            bias_initializer="zeros",
+        )
+        self.ffn_dropout = layers.Dropout(dropout_rate, name="ffn_dropout_1")
+
+    def call(
+        self,
+        query,
+        key=None,
+        value=None,
+        query_mask=None,
+        key_mask=None,
+        value_mask=None,
+        training=None,
+    ):
+        if self.pre_ln:
+            return self._call_pre_ln(
+                query, key, value, query_mask, key_mask, value_mask, training
+            )
+        else:
+            return self._call_post_ln(
+                query, key, value, query_mask, key_mask, value_mask, training
+            )
+
+    # ---------- PRE-LN ----------
+    def _call_pre_ln(
+        self, query, key, value, query_mask, key_mask, value_mask, training
+    ):
+        if self.self_attention:
+            q_norm = self.ln_q(query)
+            k_norm = q_norm
+            v_norm = q_norm
+            key_mask = query_mask
+            value_mask = query_mask
+        else:
+            q_norm = self.ln_q(query)
+            k_norm = self.ln_kv(key)
+            v_norm = self.ln_kv(value)
+
+        attn_out = self.attn(
+            q_norm,
+            k_norm,
+            v_norm,
+            query_mask=query_mask,
+            key_mask=key_mask,
+            value_mask=value_mask,
+            training=training,
+        )
+        attn_out = self.dropout_attn(attn_out, training=training)
+        x = query + attn_out  # residual
+
+        ffn_in = self.ln_ffn(x)
+        ffn_out = self.ffn_dense_1(ffn_in)
+        ffn_out = self.ffn_dropout(ffn_out, training=training)
+        ffn_out = self.ffn_dense_2(ffn_out)
+        return x + ffn_out
+
+    # ---------- POST-LN ----------
+    def _call_post_ln(
+        self, query, key, value, query_mask, key_mask, value_mask, training
+    ):
+        # Attention
+        if self.self_attention:
+            attn_out = self.attn(
+                query,
+                query,
+                query,
+                query_mask=query_mask,
+                key_mask=query_mask,
+                value_mask=query_mask,
+                training=training,
+            )
+        else:
+            attn_out = self.attn(
+                query,
+                key,
+                value,
+                query_mask=query_mask,
+                key_mask=key_mask,
+                value_mask=value_mask,
+                training=training,
+            )
+
+        attn_out = self.dropout_attn(attn_out, training=training)
+        x = self.ln_q(query + attn_out)  # LN after residual
+
+        # FFN
+        ffn_in = x
+        ffn_out = self.ffn_dense_1(ffn_in)
+        ffn_out = self.ffn_dropout(ffn_out, training=training)
+        ffn_out = self.ffn_dense_2(ffn_out)
+        return self.ln_ffn(x + ffn_out)
+
+    def build(self, query_shape, value_shape):
+        if self.self_attention:
+            key_shape = query_shape
+        else:
+            key_shape = value_shape
+
+        # Build the attention layer
+        self.attn.build(query_shape, key_shape, value_shape)
+
+        # Build the feedforward network
+        self.ffn_dense_1.build((query_shape[0], query_shape[1], self.key_dim))
+        self.ffn_dense_2.build((query_shape[0], query_shape[1], self.ff_dim))
+        self.ffn_dropout.build((query_shape[0], query_shape[1], self.key_dim))
+
+        # Build normalization layers
+        self.ln_q.build(query_shape)
+        if not self.self_attention:
+            self.ln_kv.build(key_shape)
+        self.ln_ffn.build(query_shape)
+
+        super().build(query_shape)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "num_heads": self.num_heads,
+                "key_dim": self.key_dim,
+                "dropout_rate": self.dropout_rate,
+                "ff_dim": self.ff_dim,
+                "pre_ln": self.pre_ln,
+                "self_attention": self.self_attention,
+                "regularizer": regularizers.serialize(self.regularizer),
+                "name": self.name if hasattr(self, "name") else None,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        config["regularizer"] = regularizers.deserialize(config["regularizer"])
+        return cls(**config)
+
+
 @keras.utils.register_keras_serializable(package="Custom")
 class SelfAttentionBlock(layers.Layer):
     def __init__(
@@ -32,6 +225,7 @@ class SelfAttentionBlock(layers.Layer):
         ff_dim=None,
         name="self_attention_block",
         regularizer=None,
+        pre_ln=True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -41,61 +235,29 @@ class SelfAttentionBlock(layers.Layer):
         self.dropout_rate = dropout_rate
         self.ff_dim = ff_dim or key_dim * 2
 
-        self.attention = layers.MultiHeadAttention(
+        self.attention = MultiHeadAttentionBlock(
             num_heads=num_heads,
             key_dim=key_dim,
-            name="self_attention_layer",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
-            activity_regularizer=self.regularizer,
+            dropout_rate=dropout_rate,
+            ff_dim=ff_dim,
+            name=f"{name}_attention",
+            regularizer=regularizer,
+            self_attention=True,
+            pre_ln=pre_ln,
         )
-        self.dropout1 = layers.Dropout(dropout_rate, name="dropout_1")
-        self.layer_norm_1 = layers.LayerNormalization(
-            name="layer_norm_1",
-            gamma_regularizer=self.regularizer,
-            beta_regularizer=self.regularizer,
-        )
-
-        self.ff_dense_1 = layers.Dense(
-            self.ff_dim,
-            activation="relu",
-            name="ff_dense_1",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
-            activity_regularizer=self.regularizer,
-        )
-        self.ff_dense_2 = layers.Dense(
-            key_dim,
-            name="ff_dense_2",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
-            activity_regularizer=self.regularizer,
-        )
-
-        self.dropout2 = layers.Dropout(dropout_rate)
-        self.layer_norm_2 = layers.LayerNormalization(
-            name="layer_norm_2",
-            gamma_regularizer=self.regularizer,
-            beta_regularizer=self.regularizer,
-        )
-        self.supports_masking = True
 
     def call(self, inputs, mask=None, training=None):
 
-        attention_output = self.attention(
-            inputs, inputs, key_mask=mask, query_mask=mask
+        x = self.attention(
+            query=inputs,
+            value=inputs,
+            key=inputs,
+            key_mask=mask,
+            value_mask=mask,
+            query_mask=mask,
+            training=training,
         )
-        attention_dropout = self.dropout1(attention_output, training=training)
-        attention_output_norm_1 = self.layer_norm_1(inputs + attention_dropout)
-
-        ff_output_dense_1 = self.ff_dense_1(attention_output_norm_1)
-        ff_output_dense_2 = self.ff_dense_2(ff_output_dense_1)
-        ff_output_dense_dropout = self.dropout2(ff_output_dense_2, training=training)
-        ff_output_norm = self.layer_norm_2(
-            attention_output_norm_1 + ff_output_dense_dropout
-        )
-
-        return ff_output_norm
+        return x
 
     def get_config(self):
         config = super().get_config()
@@ -106,6 +268,7 @@ class SelfAttentionBlock(layers.Layer):
                 "dropout_rate": self.dropout_rate,
                 "ff_dim": self.ff_dim,
                 "name": self.name,
+                "pre_ln": self.attention.pre_ln,
                 "regularizer": regularizers.serialize(self.regularizer),
             }
         )
@@ -114,12 +277,6 @@ class SelfAttentionBlock(layers.Layer):
     def build(self, input_shape):
         # build all child layers explicitly
         self.attention.build(input_shape, input_shape)
-        self.dropout1.build(input_shape)
-        self.layer_norm_1.build(input_shape)
-        self.ff_dense_1.build(input_shape)
-        self.ff_dense_2.build((*input_shape[:-1], self.ff_dim))
-        self.dropout2.build(input_shape)
-        self.layer_norm_2.build(input_shape)
         super().build(input_shape)
 
     @classmethod
@@ -131,15 +288,7 @@ class SelfAttentionBlock(layers.Layer):
         return input_shape
 
     def count_params(self):
-        return (
-            self.attention.count_params()
-            + self.ff_dense_1.count_params()
-            + self.ff_dense_2.count_params()
-            + self.layer_norm_1.count_params()
-            + self.layer_norm_2.count_params()
-            + self.dropout1.count_params()
-            + self.dropout2.count_params()
-        )
+        return self.attention.count_params()
 
 
 @keras.utils.register_keras_serializable(package="Custom")
@@ -152,6 +301,7 @@ class SelfAttentionStack(layers.Layer):
         dropout_rate=0.0,
         ff_dim=None,
         regularizer=None,
+        pre_ln=True,
         **kwargs,
     ):
         super(SelfAttentionStack, self).__init__(**kwargs)
@@ -168,6 +318,7 @@ class SelfAttentionStack(layers.Layer):
                 dropout_rate=dropout_rate,
                 ff_dim=ff_dim,
                 name=f"attention_block_{i+1}",
+                pre_ln=pre_ln,
                 regularizer=regularizer,
             )
             for i in range(stack_size)  # Example: 2 attention blocks
@@ -212,138 +363,6 @@ class SelfAttentionStack(layers.Layer):
         return sum(block.count_params() for block in self.attention_blocks)
 
 
-class MultiHeadAttentionBlock(layers.Layer):
-    def __init__(
-        self,
-        num_heads,
-        key_dim,
-        dropout_rate=0.0,
-        ff_dim=None,
-        regularizer=None,
-        **kwargs,
-    ):
-        super(MultiHeadAttentionBlock, self).__init__(**kwargs)
-        self.num_heads = num_heads
-        self.key_dim = key_dim
-        self.regularizer = regularizer
-        self.dropout_rate = dropout_rate
-
-        self.attention = layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=key_dim,
-            name="multi_head_attention_layer",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
-            activity_regularizer=self.regularizer,
-        )
-        self.dropout = layers.Dropout(dropout_rate, name="multi_head_attention_dropout")
-        self.layer_norm = layers.LayerNormalization(
-            name="multi_head_attention_layer_norm",
-            beta_regularizer=self.regularizer,
-            gamma_regularizer=self.regularizer,
-        )
-        if ff_dim is None:
-            self.ff_dim = key_dim * 2
-        else:
-            self.ff_dim = ff_dim
-
-        self.ff_dense_1 = layers.Dense(
-            self.ff_dim,
-            activation="relu",
-            name="ffn_dense_1",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
-            activity_regularizer=self.regularizer,
-        )
-        self.ff_dense_2 = layers.Dense(
-            key_dim,
-            name="ffn_dense_2",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
-            activity_regularizer=self.regularizer,
-        )
-        self.ff_dropout = layers.Dropout(dropout_rate, name="ffn_dropout")
-        self.ff_layer_norm = layers.LayerNormalization(
-            name="ffn_layer_norm",
-            beta_regularizer=self.regularizer,
-            gamma_regularizer=self.regularizer,
-        )
-        self.supports_masking = True
-
-    def build(self, query_shape, value_shape):
-        super(MultiHeadAttentionBlock, self).build(query_shape)
-        self.attention.build(query_shape, value_shape)
-        self.dropout.build(query_shape)
-        self.layer_norm.build(query_shape)
-        self.ff_dense_1.build(query_shape)
-        self.ff_dense_2.build((*query_shape[:-1], self.ff_dim))
-        self.ff_dropout.build(query_shape)
-        self.ff_layer_norm.build(query_shape)
-        # Ensure the layer is built with the correct input shape
-
-    def call(
-        self,
-        query,
-        value,
-        key=None,
-        key_mask=None,
-        value_mask=None,
-        query_mask=None,
-        training=None,
-    ):
-        if key is None:
-            key = value
-
-        attention_output = self.attention(
-            query,
-            value,
-            key,
-            key_mask=key_mask,
-            value_mask=value_mask,
-            query_mask=query_mask,
-        )
-        attention_output = self.dropout(attention_output, training=training)
-        attention_output = self.layer_norm(attention_output + query)
-        ff_output = self.ff_dense_1(attention_output)
-        ff_output = self.ff_dense_2(ff_output)
-        ff_output = self.ff_dropout(ff_output, training=training)
-        ff_output = self.ff_layer_norm(ff_output + attention_output)
-        return ff_output
-
-    def compute_output_shape(self, input_shape):
-        return input_shape
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "num_heads": self.num_heads,
-                "key_dim": self.key_dim,
-                "dropout_rate": self.dropout_rate,
-                "ff_dim": self.ff_dim,
-                "regularizer": regularizers.serialize(self.regularizer),
-                "name": self.name if hasattr(self, "name") else None,
-            }
-        )
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
-        return cls(**config)
-
-    def count_params(self):
-        return (
-            self.attention.count_params()
-            + self.ff_dense_1.count_params()
-            + self.ff_dense_2.count_params()
-            + self.layer_norm.count_params()
-            + self.dropout.count_params()
-            + self.ff_dropout.count_params()
-            + self.ff_layer_norm.count_params()
-        )
-
-
 class MultiHeadAttentionStack(layers.Layer):
     def __init__(
         self,
@@ -353,6 +372,8 @@ class MultiHeadAttentionStack(layers.Layer):
         dropout_rate=0.0,
         ff_dim=None,
         regularizer=None,
+        pre_ln=True,
+        self_attention=False,
         **kwargs,
     ):
 
@@ -363,6 +384,8 @@ class MultiHeadAttentionStack(layers.Layer):
         self.ff_dim = ff_dim
         self.dropout_rate = dropout_rate
         self.stack_size = stack_size
+        self.self_attention = self_attention
+        self.pre_ln = pre_ln
 
         self.attention_blocks = [
             MultiHeadAttentionBlock(
@@ -372,6 +395,8 @@ class MultiHeadAttentionStack(layers.Layer):
                 ff_dim=ff_dim,
                 name=f"multi_head_attention_block_{i+1}",
                 regularizer=regularizer,
+                pre_ln=pre_ln,
+                self_attention=self_attention,
             )
             for i in range(stack_size)
         ]
@@ -388,6 +413,11 @@ class MultiHeadAttentionStack(layers.Layer):
         training=None,
     ):
         x = query
+        if self.self_attention:
+            value = query
+            key = query
+            key_mask = query_mask
+            value_mask = query_mask
         for block in self.attention_blocks:
             x = block(
                 query=x,
@@ -412,6 +442,8 @@ class MultiHeadAttentionStack(layers.Layer):
                 "dropout_rate": self.dropout_rate,
                 "ff_dim": self.ff_dim,
                 "stack_size": self.stack_size,
+                "self_attention": self.self_attention,
+                "pre_ln": self.pre_ln,
                 "regularizer": regularizers.serialize(self.regularizer),
                 "name": self.name if hasattr(self, "name") else None,
             }
@@ -450,6 +482,7 @@ class PoolingAttentionBlock(layers.Layer):
         dropout_rate=0.0,
         ff_dim=None,
         regularizer=None,
+        pre_ln=True,
         **kwargs,
     ):
         super(PoolingAttentionBlock, self).__init__(**kwargs)
@@ -462,7 +495,7 @@ class PoolingAttentionBlock(layers.Layer):
         # Learnable seed vectors (S in the paper)
         self.seed_vectors = self.add_weight(
             shape=(num_seeds, key_dim),
-            initializer=tf.keras.initializers.GlorotUniform(),  # Better than random_normal
+            initializer="glorot_uniform",  # Better than random_normal
             trainable=True,
             name="seed_vectors",
             regularizer=self.regularizer,
@@ -478,14 +511,18 @@ class PoolingAttentionBlock(layers.Layer):
             self.ff_dim,
             activation="relu",
             name="input_ff_1",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
+            # kernel_regularizer=self.regularizer,
+            # bias_regularizer=self.regularizer,
+            kernel_initializer="glorot_uniform",
+            bias_initializer="zeros",
         )
         self.input_ff_2 = layers.Dense(
             key_dim,
             name="input_ff_2",
-            kernel_regularizer=self.regularizer,
-            bias_regularizer=self.regularizer,
+            # kernel_regularizer=self.regularizer,
+            # bias_regularizer=self.regularizer,
+            kernel_initializer="glorot_uniform",
+            bias_initializer="zeros",
         )
 
         # Use your MultiHeadAttentionBlock which already implements MAB
@@ -495,6 +532,7 @@ class PoolingAttentionBlock(layers.Layer):
             dropout_rate=dropout_rate,
             ff_dim=ff_dim,
             regularizer=self.regularizer,
+            pre_ln=pre_ln,
             name="pooling_mha",
         )
 
