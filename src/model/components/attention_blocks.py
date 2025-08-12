@@ -7,6 +7,8 @@ The attention blocks include:
 - MultiHeadAttentionBlock: A multi-head attention mechanism that allows the model to jointly attend
   to information from different representation subspaces.
 - MultiHeadAttentionStack: A stack of multi-head attention blocks for more complex attention patterns.
+- CrossAttentionBlock: A cross-attention mechanism that attends two sequences to each other.
+- CrossAttentionStack: A stack of cross-attention blocks for complex interactions between two sequences.
 - PoolingAttentionBlock: An attention mechanism that pools information from a set of seed vectors.
 - InducedSetAttentionBlock: An attention mechanism that uses induced sets for efficient attention computation.
 - point_transformer: A transformer-like architecture for processing point cloud data.
@@ -31,7 +33,7 @@ class MultiHeadAttentionBlock(layers.Layer):
         ff_dim,
         dropout_rate=0,
         self_attention=False,
-        pre_ln=True,  # "pre" or "post"
+        pre_ln=True,
         regularizer=None,
         **kwargs,
     ):
@@ -41,13 +43,13 @@ class MultiHeadAttentionBlock(layers.Layer):
         self.regularizer = regularizer
         self.num_heads = num_heads
         self.key_dim = key_dim
-        self.ff_dim = ff_dim or key_dim * 4
+        self.ff_dim = ff_dim or key_dim * 2
         self.dropout_rate = dropout_rate
 
         # LayerNorms
         self.ln_q = layers.LayerNormalization(epsilon=1e-6, name="ln_q")
         self.ln_kv = (
-            layers.LayerNormalization(epsilon=1e-6)
+            layers.LayerNormalization(epsilon=1e-6, name="ln_kv")
             if not self_attention and pre_ln
             else None
         )
@@ -66,18 +68,9 @@ class MultiHeadAttentionBlock(layers.Layer):
 
         # Feedforward network
         self.ffn_dense_1 = layers.Dense(
-            self.ff_dim,
-            activation="gelu",
-            name="ffn_dense_1",
-            kernel_initializer="glorot_uniform",
-            bias_initializer="zeros",
+            self.ff_dim, activation="gelu", name="ffn_dense_1"
         )
-        self.ffn_dense_2 = layers.Dense(
-            key_dim,
-            name="ffn_dense_2",
-            kernel_initializer="glorot_uniform",
-            bias_initializer="zeros",
-        )
+        self.ffn_dense_2 = layers.Dense(key_dim, name="ffn_dense_2")
         self.ffn_dropout = layers.Dropout(dropout_rate, name="ffn_dropout_1")
 
     def call(
@@ -99,20 +92,22 @@ class MultiHeadAttentionBlock(layers.Layer):
                 query, key, value, query_mask, key_mask, value_mask, training
             )
 
-    # ---------- PRE-LN ----------
     def _call_pre_ln(
         self, query, key, value, query_mask, key_mask, value_mask, training
     ):
         if self.self_attention:
             q_norm = self.ln_q(query)
-            k_norm = q_norm
-            v_norm = q_norm
-            key_mask = query_mask
-            value_mask = query_mask
+            k_norm = v_norm = q_norm
+            # For self-attention, use query masks for key/value too
+            key_mask = value_mask = query_mask
         else:
             q_norm = self.ln_q(query)
-            k_norm = self.ln_kv(key)
-            v_norm = self.ln_kv(value)
+            if self.ln_kv is not None:
+                k_norm = self.ln_kv(key if key is not None else query)
+                v_norm = self.ln_kv(value if value is not None else query)
+            else:
+                k_norm = key if key is not None else query
+                v_norm = value if value is not None else query
 
         attn_out = self.attn(
             q_norm,
@@ -126,13 +121,16 @@ class MultiHeadAttentionBlock(layers.Layer):
         attn_out = self.dropout_attn(attn_out, training=training)
         x = query + attn_out  # residual
 
-        ffn_in = self.ln_ffn(x)
+        if self.ln_ffn is not None:
+            ffn_in = self.ln_ffn(x)
+        else:
+            ffn_in = x
+
         ffn_out = self.ffn_dense_1(ffn_in)
         ffn_out = self.ffn_dropout(ffn_out, training=training)
         ffn_out = self.ffn_dense_2(ffn_out)
         return x + ffn_out
 
-    # ---------- POST-LN ----------
     def _call_post_ln(
         self, query, key, value, query_mask, key_mask, value_mask, training
     ):
@@ -148,10 +146,12 @@ class MultiHeadAttentionBlock(layers.Layer):
                 training=training,
             )
         else:
+            k = key if key is not None else query
+            v = value if value is not None else query
             attn_out = self.attn(
                 query,
-                key,
-                value,
+                k,
+                v,
                 query_mask=query_mask,
                 key_mask=key_mask,
                 value_mask=value_mask,
@@ -162,35 +162,45 @@ class MultiHeadAttentionBlock(layers.Layer):
         x = self.ln_q(query + attn_out)  # LN after residual
 
         # FFN
-        ffn_in = x
-        ffn_out = self.ffn_dense_1(ffn_in)
+        ffn_out = self.ffn_dense_1(x)
         ffn_out = self.ffn_dropout(ffn_out, training=training)
         ffn_out = self.ffn_dense_2(ffn_out)
-        return self.ln_ffn(x + ffn_out)
 
-    def build(self, query_shape, value_shape):
-        if self.self_attention:
-            key_shape = query_shape
+        if self.ln_ffn is not None:
+            return self.ln_ffn(x + ffn_out)
         else:
-            key_shape = value_shape
+            return x + ffn_out
 
-        # Build the attention layer
-        self.attn.build(query_shape, key_shape, value_shape)
+    def build(self, input_shape):
+        """Fixed build method for Keras compatibility"""
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
+            query_shape, key_value_shape = input_shape
+        else:
+            # Single input shape - for self-attention
+            query_shape = input_shape
+            key_value_shape = input_shape
 
-        # Build the feedforward network
-        self.ffn_dense_1.build((query_shape[0], query_shape[1], self.key_dim))
-        self.ffn_dense_2.build((query_shape[0], query_shape[1], self.ff_dim))
-        self.ffn_dropout.build((query_shape[0], query_shape[1], self.key_dim))
-
-        # Build normalization layers
+        # Build layers
+        print(
+            f"Building MultiHeadAttentionBlock with query shape: {query_shape}, key_value shape: {key_value_shape}"
+        )
         self.ln_q.build(query_shape)
-        if not self.self_attention:
-            self.ln_kv.build(key_shape)
-        self.ln_ffn.build(query_shape)
+        if self.ln_kv is not None:
+            self.ln_kv.build(key_value_shape)
+        if self.ln_ffn is not None:
+            self.ln_ffn.build(query_shape)
 
-        super().build(query_shape)
+        # Note: MultiHeadAttention builds itself automatically
+        self.ffn_dense_1.build(
+            (None, None, self.key_dim)
+        )  # Use None for flexible batch/seq dims
+        self.ffn_dense_2.build((None, None, self.ff_dim))
+
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
+        if isinstance(input_shape, (list, tuple)):
+            return input_shape[0]  # Return query shape
         return input_shape
 
     def get_config(self):
@@ -201,17 +211,16 @@ class MultiHeadAttentionBlock(layers.Layer):
                 "key_dim": self.key_dim,
                 "dropout_rate": self.dropout_rate,
                 "ff_dim": self.ff_dim,
-                "pre_ln": self.pre_ln,
                 "self_attention": self.self_attention,
-                "regularizer": regularizers.serialize(self.regularizer),
-                "name": self.name if hasattr(self, "name") else None,
+                "pre_ln": self.pre_ln,
+                "regularizer": keras.regularizers.serialize(self.regularizer),
             }
         )
         return config
 
     @classmethod
     def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
+        config["regularizer"] = keras.regularizers.deserialize(config["regularizer"])
         return cls(**config)
 
 
@@ -267,7 +276,7 @@ class SelfAttentionBlock(layers.Layer):
                 "key_dim": self.key_dim,
                 "dropout_rate": self.dropout_rate,
                 "ff_dim": self.ff_dim,
-                "name": self.name,
+                "name": self.name if hasattr(self, "name") else None,
                 "pre_ln": self.attention.pre_ln,
                 "regularizer": regularizers.serialize(self.regularizer),
             }
@@ -276,7 +285,7 @@ class SelfAttentionBlock(layers.Layer):
 
     def build(self, input_shape):
         # build all child layers explicitly
-        self.attention.build(input_shape, input_shape)
+        self.attention.build([input_shape, input_shape])
         super().build(input_shape)
 
     @classmethod
@@ -458,11 +467,232 @@ class MultiHeadAttentionStack(layers.Layer):
     def build(self, query_shape, value_shape):
         super(MultiHeadAttentionStack, self).build(query_shape)
         for block in self.attention_blocks:
-            block.build(query_shape, value_shape)
+            block.build([query_shape, value_shape])
         # Ensure the layer is built with the correct input shape
 
     def count_params(self):
         return sum(block.count_params() for block in self.attention_blocks)
+
+
+@keras.utils.register_keras_serializable(package="Custom")
+class CrossAttentionBlock(layers.Layer):
+    """
+    Cross Attention Block
+    Implements cross-attention between two sequences.
+    """
+
+    def __init__(
+        self,
+        num_heads,
+        key_dim,
+        dropout_rate=0.0,
+        ff_dim=None,
+        regularizer=None,
+        pre_ln=True,
+        **kwargs,
+    ):
+        super(CrossAttentionBlock, self).__init__(**kwargs)
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.dropout_rate = dropout_rate
+        self.ff_dim = ff_dim or key_dim * 2
+        self.regularizer = regularizer
+        self.pre_ln = pre_ln
+
+        # Create cross-attention blocks (not self-attention!)
+        self.b_to_a_attention = MultiHeadAttentionBlock(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            dropout_rate=dropout_rate,
+            ff_dim=ff_dim,
+            regularizer=regularizer,
+            pre_ln=pre_ln,
+            self_attention=False,  # Important: this is cross-attention
+            name="b_to_a_attention",
+        )
+        self.a_to_b_attention = MultiHeadAttentionBlock(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            dropout_rate=dropout_rate,
+            ff_dim=ff_dim,
+            regularizer=regularizer,
+            pre_ln=pre_ln,
+            self_attention=False,  # Important: this is cross-attention
+            name="a_to_b_attention",
+        )
+
+        self.supports_masking = True
+
+    def call(self, inputs, training=None):
+        """
+        Args:
+            inputs: Can be:
+                - [a, b] where a, b are sequences
+                - [a, b, a_mask, b_mask] with masks
+                - dict with keys 'a', 'b', 'a_mask', 'b_mask'
+
+        Returns:
+            tuple: (output_a, output_b)
+        """
+        # Handle different input formats
+        if isinstance(inputs, dict):
+            a = inputs["a"]
+            b = inputs["b"]
+            a_mask = inputs.get("a_mask", None)
+            b_mask = inputs.get("b_mask", None)
+        elif isinstance(inputs, (list, tuple)):
+            a, b = inputs[:2]
+            a_mask = inputs[2] if len(inputs) > 2 else None
+            b_mask = inputs[3] if len(inputs) > 3 else None
+        else:
+            raise ValueError("Inputs must be list/tuple or dict")
+
+        # Cross-attention: a attends to b, b attends to a
+        output_a = self.b_to_a_attention(
+            query=a,
+            key=b,
+            value=b,
+            query_mask=a_mask,
+            key_mask=b_mask,
+            value_mask=b_mask,
+            training=training,
+        )
+
+        output_b = self.a_to_b_attention(
+            query=b,
+            key=a,
+            value=a,
+            query_mask=b_mask,
+            key_mask=a_mask,
+            value_mask=a_mask,
+            training=training,
+        )
+
+        return output_a, output_b
+
+    def build(self, input_shape):
+        """
+        Build method that works with Keras conventions
+        """
+        if isinstance(input_shape, (list, tuple)):
+            a_shape, b_shape = input_shape[:2]
+        else:
+            # If single shape provided, assume both sequences have same shape
+            a_shape = b_shape = input_shape
+
+        # Build the attention layers with correct shapes
+        # For cross-attention: query_shape, key_value_shape
+        self.b_to_a_attention.build([a_shape, b_shape])  # a queries b
+        self.a_to_b_attention.build([b_shape, a_shape])  # b queries a
+
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        if isinstance(input_shape, (list, tuple)):
+            a_shape, b_shape = input_shape[:2]
+        else:
+            a_shape = b_shape = input_shape
+        return (a_shape, b_shape)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "num_heads": self.num_heads,
+                "key_dim": self.key_dim,
+                "dropout_rate": self.dropout_rate,
+                "ff_dim": self.ff_dim,
+                "regularizer": keras.regularizers.serialize(self.regularizer),
+                "pre_ln": self.pre_ln,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        config["regularizer"] = keras.regularizers.deserialize(config["regularizer"])
+        return cls(**config)
+
+    def count_params(self):
+        """
+        Count total parameters in both attention blocks
+        """
+        return (
+            self.b_to_a_attention.count_params() + self.a_to_b_attention.count_params()
+        )
+
+
+@keras.utils.register_keras_serializable(package="Custom")
+class CrossAttentionStack(layers.Layer):
+
+    def __init__(
+        self,
+        num_heads,
+        key_dim,
+        stack_size=3,
+        dropout_rate=0.0,
+        ff_dim=None,
+        regularizer=None,
+        pre_ln=True,
+        **kwargs,
+    ):
+        super(CrossAttentionStack, self).__init__(**kwargs)
+        self.regularizer = regularizer
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.ff_dim = ff_dim
+        self.dropout_rate = dropout_rate
+        self.stack_size = stack_size
+
+        self.attention_blocks = [
+            CrossAttentionBlock(
+                num_heads=num_heads,
+                key_dim=key_dim,
+                dropout_rate=dropout_rate,
+                ff_dim=ff_dim,
+                name=f"cross_attention_block_{i+1}",
+                regularizer=regularizer,
+                pre_ln=pre_ln,
+            )
+            for i in range(stack_size)
+        ]
+        self.supports_masking = True
+
+    def call(
+        self,
+        a,
+        b,
+        a_mask=None,
+        b_mask=None,
+        training=None,
+    ):
+        x_a = a
+        x_b = b
+        for block in self.attention_blocks:
+            x_a, x_b = block([x_a, x_b, a_mask, b_mask], training=training)
+        return x_a, x_b
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "num_heads": self.num_heads,
+                "key_dim": self.key_dim,
+                "dropout_rate": self.dropout_rate,
+                "ff_dim": self.ff_dim,
+                "stack_size": self.stack_size,
+                "regularizer": regularizers.serialize(self.regularizer),
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        config["regularizer"] = regularizers.deserialize(config["regularizer"])
+        return cls(**config)
 
 
 class PoolingAttentionBlock(layers.Layer):
@@ -555,7 +785,7 @@ class PoolingAttentionBlock(layers.Layer):
 
         self.input_ff_1.build(input_shape)
         self.input_ff_2.build((*input_shape[:-1], self.ff_dim))
-        self.MHA.build(seed_shape, processed_input_shape)
+        self.MHA.build([seed_shape, processed_input_shape])
 
     def call(self, inputs, mask=None):
         """
