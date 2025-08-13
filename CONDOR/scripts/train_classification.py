@@ -26,18 +26,18 @@ sig_mppc_spacetime = np.load(SIGNAL_MPPC_FILE)
 input_seq_len = bg_pixel_spacetime.shape[1]
 input_dim = bg_pixel_spacetime.shape[2]  # Exclude timestamp
 
-pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
-mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
-
-
 from src.model.components import (
     SelfAttentionStack,
     SelfAttentionBlock,
+    CrossAttentionStack,
     CrossAttentionBlock,
     PoolingAttentionBlock,
     GenerateMask,
     MLP,
 )
+
+pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
+mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
 
 feature_dim = 8
 num_heads = 6
@@ -55,7 +55,7 @@ pixel_embedding = MLP(
 pixel_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 2,
+    stack_size = 3,
     name="pixel_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
@@ -71,20 +71,20 @@ mppc_embedding = MLP(
 mppc_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 2,
+    stack_size = 3,
     name="mppc_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
 )(mppc_embedding , mask = mppc_mask)
 
-
-pixel_attend_mppc, mppc_attend_pixel = CrossAttentionBlock(
+pixel_attend_mppc, mppc_attend_pixel, _, _ = CrossAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
     name="cross_attention",
     dropout_rate=dropout_rate,
+    stack_size = 2,
     pre_ln=True,
-)([pixel_self_attention, mppc_self_attention])
+)([pixel_self_attention, mppc_self_attention, pixel_mask, mppc_mask])
 
 
 pixel_pooling = PoolingAttentionBlock(
@@ -117,23 +117,6 @@ model = keras.Model(
     outputs=output,
     name="ClassificationModel",
 )
-model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-5, global_clipnorm=1.0),
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=[keras.metrics.BinaryAccuracy()],
-)
-
-model = keras.Model(
-    inputs=[pixel_input, mppc_input],
-    outputs=output,
-    name="ClassificationModel",
-)
-model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-5),
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=[keras.metrics.BinaryAccuracy()],
-)
-
 from sklearn.model_selection import train_test_split
 
 (
@@ -155,21 +138,47 @@ from sklearn.model_selection import train_test_split
 )
 
 
+model.compile(
+    optimizer=keras.optimizers.Lion(learning_rate=1e-4),
+    loss=keras.losses.BinaryCrossentropy(),
+    metrics=[keras.metrics.BinaryAccuracy()],
+)
 model.fit(
     x=[X_pixel_train, X_mppc_train],
     y=y_train,
     validation_split=0.2,
-    epochs=100,
-    batch_size=32,
+    epochs=30,
+    batch_size=512,
     callbacks=[
         keras.callbacks.EarlyStopping(
             monitor="val_loss", patience=10, restore_best_weights=True
         )
     ],
-    class_weight={label: np.mean(y_train == label) for label in np.unique(y_train)},
+    class_weight = {label: 1/np.mean(y_train == label) for label in np.unique(y_train)}
 )
+keras.Model.save(model, f"{MODEL_DIR}/pre_train_transformer_embedding.keras")
 
-keras.Model.save(model, f"{MODEL_DIR}/transformer_embedding.keras")
+
+model.compile(
+    optimizer=keras.optimizers.Lion(learning_rate=1e-4),
+    loss=keras.losses.BinaryCrossentropy(),
+    metrics=[keras.metrics.BinaryAccuracy()],
+)
+model.fit(
+    x=[X_pixel_train, X_mppc_train],
+    y=y_train,
+    validation_split=0.2,
+    epochs=50,
+    batch_size=512,
+    callbacks=[
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=10, restore_best_weights=True
+        )
+    ],
+    class_weight = {label: 1/np.mean(y_train == label) for label in np.unique(y_train)}
+)
+keras.Model.save(model, f"{MODEL_DIR}/post_train_transformer_embedding.keras")
+
 
 hahatest_seq_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1) + (
     X_mppc_test != -1

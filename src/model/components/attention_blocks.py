@@ -24,13 +24,13 @@ import tensorflow as tf
 from keras import layers, regularizers
 
 
-@tf.keras.utils.register_keras_serializable(package="Custom", name="AttentionBlock")
+@keras.utils.register_keras_serializable(package="Custom", name="AttentionBlock")
 class MultiHeadAttentionBlock(layers.Layer):
     def __init__(
         self,
         num_heads,
         key_dim,
-        ff_dim,
+        ff_dim=None,
         dropout_rate=0,
         self_attention=False,
         pre_ln=True,
@@ -72,31 +72,41 @@ class MultiHeadAttentionBlock(layers.Layer):
         )
         self.ffn_dense_2 = layers.Dense(key_dim, name="ffn_dense_2")
         self.ffn_dropout = layers.Dropout(dropout_rate, name="ffn_dropout_1")
-    
-        self.supports_masking = True
 
     def call(
         self,
         query,
-        key=None,
         value=None,
+        key=None,
         query_mask=None,
         key_mask=None,
         value_mask=None,
         training=None,
     ):
+        if value is None and not self.self_attention:
+            raise ValueError("Value must be provided unless self-attention is used.")
         if self.pre_ln:
             return self._call_pre_ln(
-                query, key, value, query_mask, key_mask, value_mask, training
+                query=query,
+                value=value,
+                key=key,
+                query_mask=query_mask,
+                value_mask=value_mask,
+                key_mask=key_mask,
+                training=training,
             )
         else:
             return self._call_post_ln(
-                query, key, value, query_mask, key_mask, value_mask, training
+                query, value, key, query_mask, value_mask, key_mask, training
             )
 
     def _call_pre_ln(
-        self, query, key, value, query_mask, key_mask, value_mask, training
+        self, query, value, key, query_mask, value_mask, key_mask, training
     ):
+        if key is None:
+            key = value
+            key_mask = value_mask
+
         if self.self_attention:
             q_norm = self.ln_q(query)
             k_norm = v_norm = q_norm
@@ -105,11 +115,11 @@ class MultiHeadAttentionBlock(layers.Layer):
         else:
             q_norm = self.ln_q(query)
             if self.ln_kv is not None:
-                k_norm = self.ln_kv(key if key is not None else query)
-                v_norm = self.ln_kv(value if value is not None else query)
+                k_norm = self.ln_kv(key)
+                v_norm = self.ln_kv(value)
             else:
-                k_norm = key if key is not None else query
-                v_norm = value if value is not None else query
+                k_norm = key
+                v_norm = value
 
         attn_out = self.attn(
             q_norm,
@@ -134,8 +144,11 @@ class MultiHeadAttentionBlock(layers.Layer):
         return x + ffn_out
 
     def _call_post_ln(
-        self, query, key, value, query_mask, key_mask, value_mask, training
+        self, query, value, key, query_mask, value_mask, key_mask, training
     ):
+        if key is None:
+            key = value
+            key_mask = value_mask
         # Attention
         if self.self_attention:
             attn_out = self.attn(
@@ -148,12 +161,10 @@ class MultiHeadAttentionBlock(layers.Layer):
                 training=training,
             )
         else:
-            k = key if key is not None else query
-            v = value if value is not None else query
             attn_out = self.attn(
                 query,
-                k,
-                v,
+                key,
+                value,
                 query_mask=query_mask,
                 key_mask=key_mask,
                 value_mask=value_mask,
@@ -197,10 +208,12 @@ class MultiHeadAttentionBlock(layers.Layer):
 
         super().build(input_shape)
 
-    def compute_output_shape(self, input_shape):
-        if isinstance(input_shape, (list, tuple)):
-            return input_shape[0]  # Return query shape
-        return input_shape
+    def compute_output_shape(self, query_shape, key_shape=None, value_shape=None):
+        if value_shape is None:
+            value_shape = query_shape
+        if key_shape is None:
+            key_shape = query_shape
+        return (query_shape[0], query_shape[1], self.key_dim)
 
     def get_config(self):
         config = super().get_config()
@@ -242,7 +255,7 @@ class SelfAttentionBlock(layers.Layer):
         self.regularizer = regularizer
         self.dropout_rate = dropout_rate
         self.ff_dim = ff_dim or key_dim * 2
-        self.supports_masking = True
+
         self.attention = MultiHeadAttentionBlock(
             num_heads=num_heads,
             key_dim=key_dim,
@@ -331,7 +344,6 @@ class SelfAttentionStack(layers.Layer):
             )
             for i in range(stack_size)
         ]
-        self.supports_masking = True
 
     def call(self, inputs, mask=None, training=None):
         x = inputs
@@ -408,18 +420,19 @@ class MultiHeadAttentionStack(layers.Layer):
             )
             for i in range(stack_size)
         ]
-        self.supports_masking = True
 
     def call(
         self,
         query,
         value,
         key=None,
+        query_mask=None,
         key_mask=None,
         value_mask=None,
-        query_mask=None,
         training=None,
     ):
+        if key is None:
+            key = value
         x = query
         if self.self_attention:
             value = query
@@ -431,15 +444,19 @@ class MultiHeadAttentionStack(layers.Layer):
                 query=x,
                 value=value,
                 key=key,
+                query_mask=query_mask,
                 key_mask=key_mask,
                 value_mask=value_mask,
-                query_mask=query_mask,
                 training=training,
             )
         return x
 
-    def compute_output_shape(self, input_shape):
-        return input_shape
+    def compute_output_shape(self, query_shape, key_shape=None, value_shape=None):
+        if value_shape is None:
+            value_shape = query_shape
+        if key_shape is None:
+            key_shape = query_shape
+        return (query_shape[0], query_shape[1], self.key_dim)
 
     def get_config(self):
         config = super().get_config()
@@ -519,8 +536,6 @@ class CrossAttentionBlock(layers.Layer):
             self_attention=False,  # Important: this is cross-attention
             name="a_to_b_attention",
         )
-
-        self.supports_masking = True
 
     def call(self, inputs, training=None):
         """
@@ -655,16 +670,46 @@ class CrossAttentionStack(layers.Layer):
             )
             for i in range(stack_size)
         ]
-        self.supports_masking = True
 
-    def call(
-        self,
-        a,
-        b,
-        a_mask=None,
-        b_mask=None,
-        training=None,
-    ):
+    def build(self, input_shape):
+        """
+        Build method that works with Keras conventions
+        """
+        if isinstance(input_shape, (list, tuple)):
+            a_shape, b_shape = input_shape[:2]
+        else:
+            # If single shape provided, assume both sequences have same shape
+            a_shape = b_shape = input_shape
+
+        # Build the attention layers with correct shapes
+        for block in self.attention_blocks:
+            block.build([a_shape, b_shape])
+
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        """
+        Args:
+            inputs: Can be:
+                - [a, b] where a, b are sequences
+                - [a, b, a_mask, b_mask] with masks
+                - dict with keys 'a', 'b', 'a_mask', 'b_mask'
+
+        Returns:
+            tuple: (output_a, output_b)
+        """
+        # Handle different input formats
+        if isinstance(inputs, dict):
+            a = inputs["a"]
+            b = inputs["b"]
+            a_mask = inputs.get("a_mask", None)
+            b_mask = inputs.get("b_mask", None)
+        elif isinstance(inputs, (list, tuple)):
+            a, b = inputs[:2]
+            a_mask = inputs[2] if len(inputs) > 2 else None
+            b_mask = inputs[3] if len(inputs) > 3 else None
+        else:
+            raise ValueError("Inputs must be list/tuple or dict")
         x_a = a
         x_b = b
         for block in self.attention_blocks:
@@ -764,7 +809,6 @@ class PoolingAttentionBlock(layers.Layer):
             pre_ln=pre_ln,
             name="pooling_mha",
         )
-        self.supports_masking = True
 
     def build(self, input_shape):
         super(PoolingAttentionBlock, self).build(input_shape)
