@@ -9,3 +9,4 @@ tensorflow
 uproot
 ipython
 jupyter
+pickle
