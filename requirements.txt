@@ -9,5 +9,4 @@ tensorflow
 uproot
 ipython
 jupyter
-pickle
 seaborn
