@@ -72,6 +72,8 @@ class MultiHeadAttentionBlock(layers.Layer):
         )
         self.ffn_dense_2 = layers.Dense(key_dim, name="ffn_dense_2")
         self.ffn_dropout = layers.Dropout(dropout_rate, name="ffn_dropout_1")
+    
+        self.supports_masking = True
 
     def call(
         self,
@@ -240,7 +242,7 @@ class SelfAttentionBlock(layers.Layer):
         self.regularizer = regularizer
         self.dropout_rate = dropout_rate
         self.ff_dim = ff_dim or key_dim * 2
-
+        self.supports_masking = True
         self.attention = MultiHeadAttentionBlock(
             num_heads=num_heads,
             key_dim=key_dim,
@@ -762,6 +764,7 @@ class PoolingAttentionBlock(layers.Layer):
             pre_ln=pre_ln,
             name="pooling_mha",
         )
+        self.supports_masking = True
 
     def build(self, input_shape):
         super(PoolingAttentionBlock, self).build(input_shape)

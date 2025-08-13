@@ -199,6 +199,7 @@ def ContrastSamples(
     selected_samples = 0
     max_iterations = num_samples * 20
     iterations = 0
+    hit_diff_tolerance = 5
 
     while selected_samples < num_samples:
         iterations += 1
@@ -216,8 +217,8 @@ def ContrastSamples(
             continue
 
         candidates = np.where(
-            (bg_pixel_lengths < max_pixel_length - bg_pixel_lengths[bg_sample])
-            & (bg_mppc_lengths < max_mppc_length - bg_mppc_lengths[bg_sample])
+            (bg_pixel_lengths < max_pixel_length - bg_pixel_lengths[bg_sample]) & (np.abs(bg_pixel_lengths + bg_pixel_lengths[bg_sample] - pixel_length) <= hit_diff_tolerance)
+            & (bg_mppc_lengths < max_mppc_length - bg_mppc_lengths[bg_sample]) & (np.abs(bg_mppc_lengths + bg_mppc_lengths[bg_sample] - mppc_length) <= hit_diff_tolerance)
             & (bg_indices != bg_sample)
         )[0]
         if candidates.size == 0:
