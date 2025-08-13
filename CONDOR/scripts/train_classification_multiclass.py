@@ -11,20 +11,58 @@ DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
 
-SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
-BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
-SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_mppc_spacetime.npy"
-BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_mppc_spacetime.npy"
+
 SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
 SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_mppc_spacetime.npy"
+E5_PIXEL_FILE = f"{DATA_DIR}/5e_pixel_spacetime.npy"
+E5_MPPC_FILE = f"{DATA_DIR}/5e_mppc_spacetime.npy"
+FAMILON_PIXEL_FILE = f"{DATA_DIR}/familon_pixel_spacetime.npy"
+FAMILON_MPPC_FILE = f"{DATA_DIR}/familon_mppc_spacetime.npy"
+BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
+BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_mppc_spacetime.npy"
 
 bg_pixel_spacetime = np.load(BACKGROUND_PIXEL_FILE)
 bg_mppc_spacetime = np.load(BACKGROUND_MPPC_FILE)
-sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
-sig_mppc_spacetime = np.load(SIGNAL_MPPC_FILE)
+sig_only_pixel_spacetime = np.load(SIGNAL_ONLY_PIXEL_FILE)
+sig_only_mppc_spacetime = np.load(SIGNAL_ONLY_MPPC_FILE)
+e5_pixel_spacetime = np.load(E5_PIXEL_FILE)
+e5_mppc_spacetime = np.load(E5_MPPC_FILE)
+familon_pixel_spacetime = np.load(FAMILON_PIXEL_FILE)
+familon_mppc_spacetime = np.load(FAMILON_MPPC_FILE)
 
-input_seq_len = bg_pixel_spacetime.shape[1]
-input_dim = bg_pixel_spacetime.shape[2]  # Exclude timestamp
+num_classes = 4
+
+class_names = [
+    "Background",
+    "Signal",
+    "5e",
+    "Familon",
+]
+
+def make_multi_class_dataset(data_list : list[tuple]):
+    X_pixel = np.concatenate([data[0] for data in data_list], axis=0)
+    X_mppc = np.concatenate([data[1] for data in data_list], axis=0)
+    y = np.concatenate(
+        [np.full(len(data[0]), i) for i, data in enumerate(data_list)], axis=0
+    )
+    y = keras.utils.to_categorical(y, num_classes=num_classes)
+    return X_pixel, X_mppc, y
+
+
+
+X_pixel, X_mppc, y = make_multi_class_dataset(
+    [
+        (bg_pixel_spacetime, bg_mppc_spacetime),
+        (sig_only_pixel_spacetime, sig_only_mppc_spacetime),
+        (e5_pixel_spacetime, e5_mppc_spacetime),
+        (familon_pixel_spacetime, familon_mppc_spacetime),
+    ]
+)
+
+
+
+input_seq_len = sig_only_pixel_spacetime.shape[1]
+input_dim = sig_only_pixel_spacetime.shape[2]
 
 pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
 mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
@@ -55,7 +93,7 @@ pixel_embedding = MLP(
 pixel_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 2,
+    stack_size = 3,
     name="pixel_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
@@ -71,7 +109,7 @@ mppc_embedding = MLP(
 mppc_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 2,
+    stack_size = 3,
     name="mppc_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
@@ -106,8 +144,8 @@ latent_space = keras.layers.Concatenate(name="latent_space")([pixel_pooling, mpp
 latent_space = keras.layers.Flatten(name="flatten")(latent_space)
 output = MLP(
     num_layers=4,
-    output_dim=1,
-    activation="sigmoid",
+    output_dim=num_classes,
+    activation="softmax",
     name="output",
     dropout_rate=dropout_rate,
 )(latent_space)
@@ -117,22 +155,12 @@ model = keras.Model(
     outputs=output,
     name="ClassificationModel",
 )
+
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-5, global_clipnorm=1.0),
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=[keras.metrics.BinaryAccuracy()],
-)
+    loss=keras.losses.CategoricalCrossentropy(),
+    metrics=[keras.metrics.CategoricalAccuracy()],)
 
-model = keras.Model(
-    inputs=[pixel_input, mppc_input],
-    outputs=output,
-    name="ClassificationModel",
-)
-model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-5),
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=[keras.metrics.BinaryAccuracy()],
-)
 
 from sklearn.model_selection import train_test_split
 
@@ -144,11 +172,9 @@ from sklearn.model_selection import train_test_split
     y_train,
     y_test,
 ) = train_test_split(
-    np.concatenate([bg_pixel_spacetime[:, :, :], sig_pixel_spacetime[:, :, :]], axis=0),
-    np.concatenate([bg_mppc_spacetime[:, :, :], sig_mppc_spacetime[:, :, :]], axis=0),
-    np.concatenate(
-        [np.zeros(len(bg_pixel_spacetime)), np.ones(len(sig_pixel_spacetime))]
-    ),
+    X_pixel,
+    X_mppc,
+    y,
     test_size=0.2,
     random_state=42,
     shuffle=True,
@@ -209,8 +235,8 @@ seq_length_mlp = keras.Model(
 
 seq_length_mlp.compile(
     optimizer=keras.optimizers.Adam(learning_rate=1e-4),
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=[keras.metrics.BinaryAccuracy()],
+    loss=keras.losses.CategoricalCrossentropy(),
+    metrics=[keras.metrics.CategoricalAccuracy()],
 )
 seq_length_mlp.summary()
 
@@ -262,3 +288,30 @@ ax.set_ylabel("True Positive Rate")
 ax.set_title("Receiver Operating Characteristic (ROC) Curve")
 ax.legend()
 fig.savefig(f"{PLOTS_DIR}/roc_curve.png")
+
+confusion_matrix_result = confusion_matrix(y_test.argmax(axis=1), test_predictions.argmax(axis=1))
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.matshow(confusion_matrix_result, cmap=plt.cm.Blues, alpha=0.5)
+ax.set_xlabel("Predicted")
+ax.set_ylabel("True")
+ax.set_title("Confusion Matrix")
+ax.set_xticks(np.arange(num_classes))
+ax.set_yticks(np.arange(num_classes))
+ax.set_xticklabels(class_names)
+ax.set_yticklabels(class_names)
+ax.xaxis.set_ticks_position("bottom")
+ax.xaxis.set_label_position("bottom")
+ax.xaxis.tick_bottom()
+ax.tick_params(axis="x", rotation=45)
+ax.tick_params(axis="y", rotation=45)
+for i in range(num_classes):
+    for j in range(num_classes):
+        ax.text(
+            j,
+            i,
+            confusion_matrix_result[i, j],
+            ha="center",
+            va="center",
+            color="black" if confusion_matrix_result[i, j] > 0 else "white",
+        )
+fig.savefig(f"{PLOTS_DIR}/confusion_matrix.png")
