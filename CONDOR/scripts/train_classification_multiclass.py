@@ -4,6 +4,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import sklearn as sk
 import sys
+import seaborn as sns
 
 sys.path.append("../")
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
@@ -180,6 +181,11 @@ from sklearn.model_selection import train_test_split
     shuffle=True,
 )
 
+class_weights = {
+    label: 1/np.mean(y_train.argmax(axis = 1) == label) for label in np.unique(y_train.argmax(axis=1))
+}
+
+print("Class weights:", class_weights)
 
 model.fit(
     x=[X_pixel_train, X_mppc_train],
@@ -192,7 +198,7 @@ model.fit(
             monitor="val_loss", patience=10, restore_best_weights=True
         )
     ],
-    class_weight={label: np.mean(y_train == label) for label in np.unique(y_train)},
+    class_weight=class_weights,
 )
 
 keras.Model.save(model, f"{MODEL_DIR}/transformer_embedding.keras")
@@ -223,9 +229,9 @@ encoder = MLP(
 )(input)
 decoder = MLP(
     num_layers=3,
-    output_dim=1,
+    output_dim=num_classes,
     name="decoder",
-    activation="sigmoid",
+    activation="softmax",
 )(encoder)
 seq_length_mlp = keras.Model(
     inputs=[mppc_lenght_input, pixel_length_input],
@@ -265,53 +271,32 @@ test_seq_length = seq_length_mlp.predict([test_mppc_length, test_pixel_length])
 
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 
-fpr, tpr, thresholds = roc_curve(y_test, test_predictions)
-fpr_seq_length, tpr_seq_length, thresholds_seq_length = roc_curve(
-    y_test, test_seq_length
-)
-roc_auc_seq_length = auc(fpr_seq_length, tpr_seq_length)
-roc_auc = auc(fpr, tpr)
-
+confusion_matrix_result = confusion_matrix(y_test.argmax(axis=1), test_predictions.argmax(axis=1),labels=np.arange(num_classes))
+normed_confusion_matrix = confusion_matrix_result.astype("float") / (confusion_matrix_result.sum(axis=1)[:, np.newaxis] + 1e-6)
 fig, ax = plt.subplots(figsize=(8, 6))
-ax.plot(fpr, tpr, color="blue", label="ROC curve (area = {:.2f})".format(roc_auc))
-ax.plot(
-    fpr_seq_length,
-    tpr_seq_length,
-    color="green",
-    label="MLP trained on number of hits of MPPC and Pixels (area = {:.2f})".format(
-        roc_auc_seq_length
-    ),
+sns.heatmap(
+    normed_confusion_matrix,
+    annot=True,
+    cmap="Blues",
+    cbar=False,
+    ax=ax,
+    square=True,
+    linewidths=0.5,
+    linecolor="black",
+    annot_kws={"size": 16},
 )
-ax.plot([0, 1], [0, 1], color="red", linestyle="--")
-ax.set_xlabel("False Positive Rate")
-ax.set_ylabel("True Positive Rate")
-ax.set_title("Receiver Operating Characteristic (ROC) Curve")
-ax.legend()
-fig.savefig(f"{PLOTS_DIR}/roc_curve.png")
-
-confusion_matrix_result = confusion_matrix(y_test.argmax(axis=1), test_predictions.argmax(axis=1))
-fig, ax = plt.subplots(figsize=(8, 6))
-ax.matshow(confusion_matrix_result, cmap=plt.cm.Blues, alpha=0.5)
 ax.set_xlabel("Predicted")
 ax.set_ylabel("True")
 ax.set_title("Confusion Matrix")
-ax.set_xticks(np.arange(num_classes))
-ax.set_yticks(np.arange(num_classes))
+ax.set_xticks(np.arange(num_classes) + 0.5)
+ax.set_yticks(np.arange(num_classes) + 0.5)
 ax.set_xticklabels(class_names)
 ax.set_yticklabels(class_names)
+ax.set_xlim(0, num_classes)
+ax.set_ylim(0, num_classes)
 ax.xaxis.set_ticks_position("bottom")
 ax.xaxis.set_label_position("bottom")
 ax.xaxis.tick_bottom()
 ax.tick_params(axis="x", rotation=45)
 ax.tick_params(axis="y", rotation=45)
-for i in range(num_classes):
-    for j in range(num_classes):
-        ax.text(
-            j,
-            i,
-            confusion_matrix_result[i, j],
-            ha="center",
-            va="center",
-            color="black" if confusion_matrix_result[i, j] > 0 else "white",
-        )
 fig.savefig(f"{PLOTS_DIR}/confusion_matrix.png")
