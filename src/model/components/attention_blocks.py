@@ -45,7 +45,7 @@ class MultiHeadAttentionBlock(layers.Layer):
         self.key_dim = key_dim
         self.ff_dim = ff_dim or key_dim * 2
         self.dropout_rate = dropout_rate
-
+        self.supports_masking = False
         # LayerNorms
         self.ln_q = layers.LayerNormalization(epsilon=1e-6, name="ln_q")
         self.ln_kv = (
@@ -510,29 +510,18 @@ class CrossAttentionBlock(layers.Layer):
             name="a_to_b_attention",
         )
 
-    def call(self, inputs, training=None):
+    def call(self, a, b, a_mask, b_mask, training=None):
         """
         Args:
-            inputs: Can be:
-                - [a, b] where a, b are sequences
-                - [a, b, a_mask, b_mask] with masks
-                - dict with keys 'a', 'b', 'a_mask', 'b_mask'
-
+            a: First sequence (query)
+            b: Second sequence (key/value)
+            a_mask: Mask for the first sequence
+            b_mask: Mask for the second sequence
+            training: Whether in training mode
         Returns:
             tuple: (output_a, output_b)
         """
         # Handle different input formats
-        if isinstance(inputs, dict):
-            a = inputs["a"]
-            b = inputs["b"]
-            a_mask = inputs.get("a_mask", None)
-            b_mask = inputs.get("b_mask", None)
-        elif isinstance(inputs, (list, tuple)):
-            a, b = inputs[:2]
-            a_mask = inputs[2] if len(inputs) > 2 else None
-            b_mask = inputs[3] if len(inputs) > 3 else None
-        else:
-            raise ValueError("Inputs must be list/tuple or dict")
 
         # Cross-attention: a attends to b, b attends to a
         output_a = self.b_to_a_attention(
@@ -555,30 +544,20 @@ class CrossAttentionBlock(layers.Layer):
             training=training,
         )
 
-        return output_a, output_b
+        return (output_a, output_b)
 
-    def build(self, input_shape):
+    def build(self, a_shape, b_shape):
         """
         Build method that works with Keras conventions
         """
-        if isinstance(input_shape, (list, tuple)):
-            a_shape, b_shape = input_shape[:2]
-        else:
-            # If single shape provided, assume both sequences have same shape
-            a_shape = b_shape = input_shape
-
         # Build the attention layers with correct shapes
         # For cross-attention: query_shape, key_value_shape
-        self.b_to_a_attention.build([a_shape, b_shape])  # a queries b
-        self.a_to_b_attention.build([b_shape, a_shape])  # b queries a
+        self.b_to_a_attention.build(a_shape, b_shape)  # a queries b
+        self.a_to_b_attention.build(b_shape, a_shape)  # b queries a
 
-        super().build(input_shape)
+        super().build(a_shape)
 
-    def compute_output_shape(self, input_shape):
-        if isinstance(input_shape, (list, tuple)):
-            a_shape, b_shape = input_shape[:2]
-        else:
-            a_shape = b_shape = input_shape
+    def compute_output_shape(self, a_shape, b_shape):
         return (a_shape, b_shape)
 
     def get_config(self):
@@ -655,7 +634,7 @@ class CrossAttentionStack(layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, inputs, training=None):
+    def call(self, a, b, a_mask, b_mask, training=None):
         """
         Args:
             inputs: Can be:
@@ -667,25 +646,14 @@ class CrossAttentionStack(layers.Layer):
             tuple: (output_a, output_b)
         """
         # Handle different input formats
-        if isinstance(inputs, dict):
-            a = inputs["a"]
-            b = inputs["b"]
-            a_mask = inputs.get("a_mask", None)
-            b_mask = inputs.get("b_mask", None)
-        elif isinstance(inputs, (list, tuple)):
-            a, b = inputs[:2]
-            a_mask = inputs[2] if len(inputs) > 2 else None
-            b_mask = inputs[3] if len(inputs) > 3 else None
-        else:
-            raise ValueError("Inputs must be list/tuple or dict")
         x_a = a
         x_b = b
         for block in self.attention_blocks:
-            x_a, x_b = block([x_a, x_b, a_mask, b_mask], training=training)
+            x_a, x_b = block(x_a, x_b, a_mask, b_mask, training=training)
         return x_a, x_b
 
-    def compute_output_shape(self, input_shape):
-        return input_shape
+    def compute_output_shape(self, a_shape, b_shape):
+        return (a_shape, b_shape)
 
     def get_config(self):
         config = super().get_config()
