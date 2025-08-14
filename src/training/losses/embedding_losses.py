@@ -271,7 +271,7 @@ class EmbeddingSpaceSpreading(keras.losses.Loss):
         )
 
 
-class TripletLoss(tf.keras.losses.Loss):
+class TripletLoss(keras.losses.Loss):
     def __init__(self, margin=1.0, normalize=True, **kwargs):
         super().__init__(**kwargs)
         self.margin = margin
@@ -296,5 +296,27 @@ class TripletLoss(tf.keras.losses.Loss):
         config.update({
             'margin': self.margin,
             'normalize': self.normalize
+        })
+        return config
+
+
+class TripletLossWithRegularization(TripletLoss):
+    def __init__(self, regularization_loss : keras.losses.Loss, **kwargs):
+        super().__init__(**kwargs)
+        self.regularization_loss = regularization_loss
+
+    def call(self, _, y_pred):
+        loss = super().call(_, y_pred)
+        anchor, positive, negative = tf.split(y_pred, 3, axis=-1)
+        anchor_reg = self.regularization_loss(_,anchor)
+        positive_reg = self.regularization_loss(_,positive)
+        negative_reg = self.regularization_loss(_,negative)
+        reg_loss = (anchor_reg + positive_reg + negative_reg) / 3.0
+        return loss + reg_loss
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'regularization_loss': keras.losses.serialize(self.regularization_loss)
         })
         return config

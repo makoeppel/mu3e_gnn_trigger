@@ -121,10 +121,5 @@ class MLP(keras.layers.Layer):
         )
         return config
 
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
-        return cls(**config)
-
     def count_params(self):
         return sum(layer.count_params() for layer in self.layers_list)

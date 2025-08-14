@@ -24,7 +24,7 @@ import tensorflow as tf
 from keras import layers, regularizers
 
 
-@keras.utils.register_keras_serializable(package="Custom", name="AttentionBlock")
+@keras.utils.register_keras_serializable(package="Custom", name="MultiHeadAttentionBlock")
 class MultiHeadAttentionBlock(layers.Layer):
     def __init__(
         self,
@@ -184,29 +184,22 @@ class MultiHeadAttentionBlock(layers.Layer):
         else:
             return x + ffn_out
 
-    def build(self, input_shape):
+    def build(self, query_shape, value_shape, key_shape = None):
         """Fixed build method for Keras compatibility"""
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
-            query_shape, key_value_shape = input_shape
-        else:
-            # Single input shape - for self-attention
-            query_shape = input_shape
-            key_value_shape = input_shape
-
+        if key_shape is None:
+            key_shape = value_shape
         # Build layers
         self.ln_q.build(query_shape)
         if self.ln_kv is not None:
-            self.ln_kv.build(key_value_shape)
+            self.ln_kv.build(value_shape)
         if self.ln_ffn is not None:
             self.ln_ffn.build(query_shape)
 
-        # Note: MultiHeadAttention builds itself automatically
-        self.ffn_dense_1.build(
-            (None, None, self.key_dim)
-        )  # Use None for flexible batch/seq dims
+        self.attn.build(query_shape, value_shape, key_shape)
+        self.ffn_dense_1.build((None, None, self.key_dim))  # Use None for flexible batch/seq dims
         self.ffn_dense_2.build((None, None, self.ff_dim))
 
-        super().build(input_shape)
+        super().build(query_shape)
 
     def compute_output_shape(self, query_shape, key_shape=None, value_shape=None):
         if value_shape is None:
@@ -229,11 +222,6 @@ class MultiHeadAttentionBlock(layers.Layer):
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = keras.regularizers.deserialize(config["regularizer"])
-        return cls(**config)
 
 
 @keras.utils.register_keras_serializable(package="Custom")
@@ -297,13 +285,8 @@ class SelfAttentionBlock(layers.Layer):
 
     def build(self, input_shape):
         # build all child layers explicitly
-        self.attention.build([input_shape, input_shape])
+        self.attention.build(input_shape, input_shape)
         super().build(input_shape)
-
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
-        return cls(**config)
 
     def compute_output_shape(self, input_shape):
         return input_shape
@@ -373,11 +356,6 @@ class SelfAttentionStack(layers.Layer):
         for block in self.attention_blocks:
             block.build(x_shape)
         super().build(input_shape)
-
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
-        return cls(**config)
 
     def count_params(self):
         return sum(block.count_params() for block in self.attention_blocks)
@@ -475,15 +453,10 @@ class MultiHeadAttentionStack(layers.Layer):
         )
         return config
 
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
-        return cls(**config)
-
     def build(self, query_shape, value_shape):
         super(MultiHeadAttentionStack, self).build(query_shape)
         for block in self.attention_blocks:
-            block.build([query_shape, value_shape])
+            block.build(query_shape, value_shape)
         # Ensure the layer is built with the correct input shape
 
     def count_params(self):
@@ -622,11 +595,6 @@ class CrossAttentionBlock(layers.Layer):
         )
         return config
 
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = keras.regularizers.deserialize(config["regularizer"])
-        return cls(**config)
-
     def count_params(self):
         """
         Count total parameters in both attention blocks
@@ -733,11 +701,6 @@ class CrossAttentionStack(layers.Layer):
         )
         return config
 
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
-        return cls(**config)
-
 
 class PoolingAttentionBlock(layers.Layer):
     """
@@ -829,7 +792,7 @@ class PoolingAttentionBlock(layers.Layer):
 
         self.input_ff_1.build(input_shape)
         self.input_ff_2.build((*input_shape[:-1], self.ff_dim))
-        self.MHA.build([seed_shape, processed_input_shape])
+        self.MHA.build(seed_shape, processed_input_shape)
 
     def call(self, inputs, mask=None):
         """
@@ -879,11 +842,6 @@ class PoolingAttentionBlock(layers.Layer):
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config):
-        config["regularizer"] = regularizers.deserialize(config["regularizer"])
-        return cls(**config)
 
     def count_params(self):
         return (
