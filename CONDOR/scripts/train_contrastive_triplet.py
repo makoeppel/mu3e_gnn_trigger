@@ -59,7 +59,7 @@ feature_dim = 8
 num_heads = 8
 latent_dim = 8
 num_seeds = 2
-dropout_rate = 0.1
+dropout_rate = 0.0
 
 pixel_input = keras.Input(shape=(seq_length, input_dim), name="pixel_input")
 mppc_input = keras.Input(shape=(seq_length, input_dim), name="mppc_input")
@@ -105,7 +105,7 @@ pixel_attend_mppc, mppc_attend_pixel = CrossAttentionBlock(
     name="cross_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
-)([pixel_self_attention, mppc_self_attention])
+)(pixel_self_attention, mppc_self_attention, pixel_mask, mppc_mask)
 
 
 pixel_pooling = PoolingAttentionBlock(
@@ -147,11 +147,12 @@ siamese_model = make_siamese_encoder(
 )
 
 
-from src.training import TripletLoss
+from src.training import TripletLoss, TripletLossWithRegularization, VarianceCovarianceLoss
+
 
 siamese_model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss=TripletLoss(margin=0.2),
+    optimizer=keras.optimizers.Lion(learning_rate=1e-4),
+    loss=TripletLossWithRegularization(VarianceCovarianceLoss())
 )
 
 siamese_model.fit(
@@ -165,7 +166,27 @@ siamese_model.fit(
     ],
     y=np.zeros(contrast_mppc_signal.shape[0]),  # Dummy labels
     validation_split=0.2,
-    epochs=30,
+    epochs=10,
+    batch_size=128,
+)
+
+siamese_model.compile(
+    optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+    loss=TripletLossWithRegularization(VarianceCovarianceLoss())
+)
+
+siamese_model.fit(
+    x=[
+        base_pixel,
+        base_mppc,
+        contrast_pixel_background,
+        contrast_mppc_background,
+        contrast_pixel_signal,
+        contrast_mppc_signal,
+    ],
+    y=np.zeros(contrast_mppc_signal.shape[0]),  # Dummy labels
+    validation_split=0.2,
+    epochs=10,
     batch_size=128,
 )
 
