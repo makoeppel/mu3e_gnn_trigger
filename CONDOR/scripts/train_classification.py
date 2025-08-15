@@ -4,12 +4,16 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import sklearn as sk
 import sys
-
+import seaborn as sns
+import os
 sys.path.append("../")
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
+MODEL_NAME = "multi_class_classification"
+
+os.makedirs(f"{MODEL_DIR}/{MODEL_NAME}", exist_ok=True)
 
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
@@ -39,8 +43,8 @@ from src.model.components import (
 pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
 mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
 
-feature_dim = 8
-num_heads = 6
+feature_dim = 16
+num_heads = 8
 dropout_rate = 0
 
 pixel_mask = GenerateMask(name="mask")(pixel_input)
@@ -55,12 +59,14 @@ pixel_embedding = MLP(
 pixel_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 3,
+    stack_size = 2,
     name="pixel_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
 )(pixel_embedding , mask = pixel_mask)
+
 mppc_mask = GenerateMask(name="mppc_mask")(mppc_input)
+
 mppc_embedding = MLP(
     num_layers=4,
     output_dim=feature_dim,
@@ -68,23 +74,24 @@ mppc_embedding = MLP(
     name="mppc_embedding",
     dropout_rate=dropout_rate,
 )(mppc_input)
+
 mppc_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 3,
+    stack_size = 2,
     name="mppc_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
 )(mppc_embedding , mask = mppc_mask)
 
-pixel_attend_mppc, mppc_attend_pixel, _, _ = CrossAttentionStack(
+pixel_attend_mppc, mppc_attend_pixel = CrossAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
     name="cross_attention",
     dropout_rate=dropout_rate,
     stack_size = 2,
     pre_ln=True,
-)([pixel_self_attention, mppc_self_attention, pixel_mask, mppc_mask])
+)(pixel_self_attention, mppc_self_attention, pixel_mask, mppc_mask)
 
 
 pixel_pooling = PoolingAttentionBlock(
@@ -147,37 +154,25 @@ model.fit(
     x=[X_pixel_train, X_mppc_train],
     y=y_train,
     validation_split=0.2,
-    epochs=30,
-    batch_size=512,
-    callbacks=[
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=10, restore_best_weights=True
-        )
-    ],
-    class_weight = {label: 1/np.mean(y_train == label) for label in np.unique(y_train)}
-)
-keras.Model.save(model, f"{MODEL_DIR}/pre_train_transformer_embedding.keras")
-
-
-model.compile(
-    optimizer=keras.optimizers.Lion(learning_rate=1e-4),
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=[keras.metrics.BinaryAccuracy()],
-)
-model.fit(
-    x=[X_pixel_train, X_mppc_train],
-    y=y_train,
-    validation_split=0.2,
     epochs=50,
     batch_size=512,
     callbacks=[
         keras.callbacks.EarlyStopping(
             monitor="val_loss", patience=10, restore_best_weights=True
-        )
+        ),
+    keras.callbacks.ModelCheckpoint(
+            filepath=f"{MODEL_DIR}/{MODEL_NAME}/" + "{epoch:02d}-{val_loss:.2f}.keras",
+            save_best_only=True,
+            monitor="val_loss",
+            mode="min",
+        ),
+
     ],
     class_weight = {label: 1/np.mean(y_train == label) for label in np.unique(y_train)}
 )
-keras.Model.save(model, f"{MODEL_DIR}/post_train_transformer_embedding.keras")
+
+
+keras.Model.save(model, f"{MODEL_DIR}/{MODEL_NAME}/" + "final_model.keras",)
 
 
 hahatest_seq_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1) + (

@@ -164,8 +164,8 @@ model = keras.Model(
 )
 
 model.compile(
-    optimizer=keras.optimizers.AdamW(
-        learning_rate=1e-4, weight_decay=1e-5, global_clipnorm=1.0
+    optimizer=keras.optimizers.Lion(
+        learning_rate = 1e-4
     ),
     loss=keras.losses.CategoricalCrossentropy(),
     metrics=[keras.metrics.CategoricalAccuracy()],
