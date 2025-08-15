@@ -217,13 +217,12 @@ def ContrastSamples(
             continue
 
         candidates = np.where(
-            (bg_pixel_lengths < max_pixel_length - bg_pixel_lengths[bg_sample]) & (np.abs(bg_pixel_lengths + bg_pixel_lengths[bg_sample] - pixel_length) <= hit_diff_tolerance)
-            & (bg_mppc_lengths < max_mppc_length - bg_mppc_lengths[bg_sample]) & (np.abs(bg_mppc_lengths + bg_mppc_lengths[bg_sample] - mppc_length) <= hit_diff_tolerance)
-            & (bg_indices != bg_sample)
+            (np.abs(bg_pixel_lengths - pixel_length) <= hit_diff_tolerance) & 
+            (np.abs(bg_mppc_lengths - mppc_length) <= hit_diff_tolerance)
         )[0]
         if candidates.size == 0:
             continue
-        smaller_bg = np.random.choice(candidates)
+        large_bg = np.random.choice(candidates)
 
         copy_sequence(
             pure_bg_pixel,
@@ -269,32 +268,19 @@ def ContrastSamples(
         copy_sequence(
             contrast_pixel_background,
             selected_samples,
-            bg_pixel_spacetime[smaller_bg],
-            bg_pixel_masks[smaller_bg],
-        )
-        copy_sequence(
-            contrast_pixel_background,
-            selected_samples,
-            bg_pixel_spacetime[bg_sample],
-            bg_pixel_masks[bg_sample],
-            offset=bg_pixel_lengths[smaller_bg],
+            bg_pixel_spacetime[large_bg],
+            bg_pixel_masks[large_bg],
         )
 
         copy_sequence(
             contrast_mppc_background,
             selected_samples,
-            bg_mppc_spacetime[smaller_bg],
-            bg_mppc_masks[smaller_bg],
-        )
-        copy_sequence(
-            contrast_mppc_background,
-            selected_samples,
-            bg_mppc_spacetime[bg_sample],
-            bg_mppc_masks[bg_sample],
-            offset=bg_mppc_lengths[smaller_bg],
+            bg_mppc_spacetime[large_bg],
+            bg_mppc_masks[large_bg],
         )
 
         used_bg_indices.add(bg_sample)
+        used_bg_indices.add(large_bg)
         used_sig_indices.add(sig_sample)
         index_combination.add((bg_sample, sig_sample))
         selected_samples += 1

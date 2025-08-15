@@ -4,12 +4,16 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import sklearn as sk
 import sys
+import os
 
 sys.path.append("../")
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
+MODEL_NAME = "transformer_embedding"
+
+os.makedirs(f"{MODEL_DIR}/{MODEL_NAME}", exist_ok=True)
 
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
@@ -42,13 +46,12 @@ from src.utils import ContrastSamples
     sig_only_pixel_spacetime,
     bg_mppc_spacetime,
     sig_only_mppc_spacetime,
-    num_samples=200000,
+    num_samples=400000,
     padding_value=-1,
 )
 
 from src.model.components import (
     SelfAttentionStack,
-    SelfAttentionBlock,
     CrossAttentionBlock,
     PoolingAttentionBlock,
     GenerateMask,
@@ -60,6 +63,23 @@ num_heads = 8
 latent_dim = 8
 num_seeds = 2
 dropout_rate = 0.0
+
+from src.model.components import (
+    SelfAttentionStack,
+    SelfAttentionBlock,
+    CrossAttentionBlock,
+    CrossAttentionStack,
+    PoolingAttentionBlock,
+    MultiHeadAttentionBlock,
+    GenerateMask,
+    MLP,
+)
+
+feature_dim = 16
+num_heads = 8
+latent_dim = 8
+num_seeds = 1
+dropout_rate = 0
 
 pixel_input = keras.Input(shape=(seq_length, input_dim), name="pixel_input")
 mppc_input = keras.Input(shape=(seq_length, input_dim), name="mppc_input")
@@ -76,11 +96,11 @@ pixel_embedding = MLP(
 pixel_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 2,
+    stack_size=2,
     name="pixel_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
-)(pixel_embedding , mask = pixel_mask)
+)(pixel_embedding, mask=pixel_mask)
 mppc_mask = GenerateMask(name="mppc_mask")(mppc_input)
 mppc_embedding = MLP(
     num_layers=4,
@@ -92,38 +112,38 @@ mppc_embedding = MLP(
 mppc_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 2,
+    stack_size=2,
     name="mppc_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
-)(mppc_embedding , mask = mppc_mask)
+)(mppc_embedding, mask=mppc_mask)
 
-
-pixel_attend_mppc, mppc_attend_pixel = CrossAttentionBlock(
+pixel_attend_mppc, mppc_attend_pixel = CrossAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
+    stack_size=2,
     name="cross_attention",
     dropout_rate=dropout_rate,
-    pre_ln=True,
 )(pixel_self_attention, mppc_self_attention, pixel_mask, mppc_mask)
 
-
 pixel_pooling = PoolingAttentionBlock(
-    num_seeds = num_seeds,
+    num_seeds=num_seeds,
     key_dim=feature_dim,
     name="pooling_attention",
     dropout_rate=dropout_rate,
 )(pixel_attend_mppc, mask=pixel_mask)
 
 mppc_pooling = PoolingAttentionBlock(
-    num_seeds = num_seeds,
+    num_seeds=num_seeds,
     key_dim=feature_dim,
     name="mppc_pooling_attention",
     dropout_rate=dropout_rate,
 )(mppc_attend_pixel, mask=mppc_mask)
 
+latent_space = keras.layers.Concatenate(name="latent_space")(
+    [pixel_pooling, mppc_pooling]
+)
 
-latent_space = keras.layers.Concatenate(name="latent_space")([pixel_pooling, mppc_pooling])
 latent_space = keras.layers.Flatten(name="flatten")(latent_space)
 output = MLP(
     num_layers=4,
@@ -138,7 +158,6 @@ transformer_embedding = keras.Model(
     outputs=output,
     name="ClassificationModel",
 )
-
 from src.model.wrapper.siamese import make_siamese_encoder
 
 siamese_model = make_siamese_encoder(
@@ -147,12 +166,16 @@ siamese_model = make_siamese_encoder(
 )
 
 
-from src.training import TripletLoss, TripletLossWithRegularization, VarianceCovarianceLoss
+from src.training import (
+    TripletLoss,
+    TripletLossWithRegularization,
+    VarianceCovarianceLoss,
+)
 
 
 siamese_model.compile(
     optimizer=keras.optimizers.Lion(learning_rate=1e-4),
-    loss=TripletLossWithRegularization(VarianceCovarianceLoss())
+    loss=TripletLossWithRegularization(VarianceCovarianceLoss()),
 )
 
 siamese_model.fit(
@@ -168,11 +191,19 @@ siamese_model.fit(
     validation_split=0.2,
     epochs=10,
     batch_size=128,
+    callbacks=[
+        keras.callbacks.ModelCheckpoint(
+            filepath=f"{MODEL_DIR}/{MODEL_NAME}/" + "{epoch:02d}-{val_loss:.2f}.keras",
+            save_best_only=True,
+            monitor="val_loss",
+            mode="min",
+        ),
+    ],
 )
 
 siamese_model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss=TripletLossWithRegularization(VarianceCovarianceLoss())
+    loss=TripletLossWithRegularization(VarianceCovarianceLoss()),
 )
 
 siamese_model.fit(

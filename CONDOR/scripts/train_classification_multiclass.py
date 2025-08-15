@@ -5,12 +5,15 @@ import matplotlib.pyplot as plt
 import sklearn as sk
 import sys
 import seaborn as sns
-
+import os
 sys.path.append("../")
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
+MODEL_NAME = "multi_class_classification"
+
+os.makedirs(f"{MODEL_DIR}/{MODEL_NAME}", exist_ok=True)
 
 
 SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
@@ -40,7 +43,8 @@ class_names = [
     "Familon",
 ]
 
-def make_multi_class_dataset(data_list : list[tuple]):
+
+def make_multi_class_dataset(data_list: list[tuple]):
     X_pixel = np.concatenate([data[0] for data in data_list], axis=0)
     X_mppc = np.concatenate([data[1] for data in data_list], axis=0)
     y = np.concatenate(
@@ -48,7 +52,6 @@ def make_multi_class_dataset(data_list : list[tuple]):
     )
     y = keras.utils.to_categorical(y, num_classes=num_classes)
     return X_pixel, X_mppc, y
-
 
 
 X_pixel, X_mppc, y = make_multi_class_dataset(
@@ -61,7 +64,6 @@ X_pixel, X_mppc, y = make_multi_class_dataset(
 )
 
 
-
 input_seq_len = sig_only_pixel_spacetime.shape[1]
 input_dim = sig_only_pixel_spacetime.shape[2]
 
@@ -72,14 +74,14 @@ mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
 from src.model.components import (
     SelfAttentionStack,
     SelfAttentionBlock,
-    CrossAttentionBlock,
+    CrossAttentionStack,
     PoolingAttentionBlock,
     GenerateMask,
     MLP,
 )
 
-feature_dim = 8
-num_heads = 6
+feature_dim = 16
+num_heads = 8
 dropout_rate = 0
 
 pixel_mask = GenerateMask(name="mask")(pixel_input)
@@ -94,11 +96,11 @@ pixel_embedding = MLP(
 pixel_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 3,
+    stack_size=2,
     name="pixel_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
-)(pixel_embedding , mask = pixel_mask)
+)(pixel_embedding, mask=pixel_mask)
 mppc_mask = GenerateMask(name="mppc_mask")(mppc_input)
 mppc_embedding = MLP(
     num_layers=4,
@@ -110,38 +112,42 @@ mppc_embedding = MLP(
 mppc_self_attention = SelfAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 3,
+    stack_size=2,
     name="mppc_self_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
-)(mppc_embedding , mask = mppc_mask)
+)(mppc_embedding, mask=mppc_mask)
 
 
-pixel_attend_mppc, mppc_attend_pixel = CrossAttentionBlock(
+pixel_attend_mppc, mppc_attend_pixel = CrossAttentionStack(
     num_heads=num_heads,
     key_dim=feature_dim,
+    stack_size=2,
     name="cross_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
-)([pixel_self_attention, mppc_self_attention])
+)(pixel_self_attention, mppc_self_attention, 
+    a_mask=pixel_mask, b_mask=mppc_mask)
 
 
 pixel_pooling = PoolingAttentionBlock(
-    num_seeds = 1,
+    num_seeds=1,
     key_dim=feature_dim,
     name="pooling_attention",
     dropout_rate=dropout_rate,
 )(pixel_attend_mppc, mask=pixel_mask)
 
 mppc_pooling = PoolingAttentionBlock(
-    num_seeds = 1,
+    num_seeds=1,
     key_dim=feature_dim,
     name="mppc_pooling_attention",
     dropout_rate=dropout_rate,
 )(mppc_attend_pixel, mask=mppc_mask)
 
 
-latent_space = keras.layers.Concatenate(name="latent_space")([pixel_pooling, mppc_pooling])
+latent_space = keras.layers.Concatenate(name="latent_space")(
+    [pixel_pooling, mppc_pooling]
+)
 latent_space = keras.layers.Flatten(name="flatten")(latent_space)
 output = MLP(
     num_layers=4,
@@ -158,9 +164,12 @@ model = keras.Model(
 )
 
 model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-5, global_clipnorm=1.0),
+    optimizer=keras.optimizers.AdamW(
+        learning_rate=1e-4, weight_decay=1e-5, global_clipnorm=1.0
+    ),
     loss=keras.losses.CategoricalCrossentropy(),
-    metrics=[keras.metrics.CategoricalAccuracy()],)
+    metrics=[keras.metrics.CategoricalAccuracy()],
+)
 
 
 from sklearn.model_selection import train_test_split
@@ -182,97 +191,40 @@ from sklearn.model_selection import train_test_split
 )
 
 class_weights = {
-    label: 1/np.mean(y_train.argmax(axis = 1) == label) for label in np.unique(y_train.argmax(axis=1))
+    label: 1 / np.mean(y_train.argmax(axis=1) == label)
+    for label in np.unique(y_train.argmax(axis=1))
 }
-
-print("Class weights:", class_weights)
 
 model.fit(
     x=[X_pixel_train, X_mppc_train],
     y=y_train,
     validation_split=0.2,
-    epochs=100,
-    batch_size=32,
-    callbacks=[
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=10, restore_best_weights=True
-        )
-    ],
-    class_weight=class_weights,
-)
-
-keras.Model.save(model, f"{MODEL_DIR}/transformer_embedding.keras")
-
-hahatest_seq_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1) + (
-    X_mppc_test != -1
-).all(axis=-1).sum(axis=-1)
-test_mppc_length = (X_mppc_test != -1).all(axis=-1).sum(axis=-1)
-test_pixel_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1)
-train_mppc_length = (X_mppc_train != -1).all(axis=-1).sum(axis=-1)
-train_pixel_length = (X_pixel_train != -1).all(axis=-1).sum(axis=-1)
-
-
-mppc_lenght_input = keras.Input(shape=(1,), name="mppc_length_input")
-pixel_length_input = keras.Input(shape=(1,), name="pixel_length_input")
-
-input = keras.layers.Concatenate(name="input")(
-    [
-        mppc_lenght_input,
-        pixel_length_input,
-    ]
-)
-encoder = MLP(
-    num_layers=3,
-    output_dim=10,
-    name="encoder",
-    activation="relu",
-)(input)
-decoder = MLP(
-    num_layers=3,
-    output_dim=num_classes,
-    name="decoder",
-    activation="softmax",
-)(encoder)
-seq_length_mlp = keras.Model(
-    inputs=[mppc_lenght_input, pixel_length_input],
-    outputs=decoder,
-    name="SeqLengthMLP",
-)
-
-seq_length_mlp.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-4),
-    loss=keras.losses.CategoricalCrossentropy(),
-    metrics=[keras.metrics.CategoricalAccuracy()],
-)
-seq_length_mlp.summary()
-
-
-seq_length_mlp.fit(
-    x=[train_mppc_length, train_pixel_length],
-    y=y_train,
-    validation_split=0.2,
-    epochs=100,
+    epochs=30,
     batch_size=128,
+    class_weight=class_weights,
     callbacks=[
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=10, restore_best_weights=True
-        )
+        keras.callbacks.ModelCheckpoint(
+            filepath=f"{MODEL_DIR}/{MODEL_NAME}/" + "{epoch:02d}-{val_loss:.2f}.keras",
+            save_best_only=True,
+            monitor="val_loss",
+            mode="min",
+        ),
     ],
-    class_weight={
-        label: np.sum(y_train == label) / len(y_train)
-        for label in np.unique(y_train)
-        if label in [0, 1]
-    },
 )
 
 
 test_predictions = model.predict([X_pixel_test, X_mppc_test])
-test_seq_length = seq_length_mlp.predict([test_mppc_length, test_pixel_length])
 
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 
-confusion_matrix_result = confusion_matrix(y_test.argmax(axis=1), test_predictions.argmax(axis=1),labels=np.arange(num_classes))
-normed_confusion_matrix = confusion_matrix_result.astype("float") / (confusion_matrix_result.sum(axis=1)[:, np.newaxis] + 1e-6)
+confusion_matrix_result = confusion_matrix(
+    y_test.argmax(axis=1),
+    test_predictions.argmax(axis=1),
+    labels=np.arange(num_classes),
+)
+normed_confusion_matrix = confusion_matrix_result.astype("float") / (
+    confusion_matrix_result.sum(axis=1)[:, np.newaxis] + 1e-6
+)
 fig, ax = plt.subplots(figsize=(8, 6))
 sns.heatmap(
     normed_confusion_matrix,

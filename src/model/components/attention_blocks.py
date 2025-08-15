@@ -618,21 +618,16 @@ class CrossAttentionStack(layers.Layer):
             for i in range(stack_size)
         ]
 
-    def build(self, input_shape):
+    def build(self, a_shape, b_shape ):
         """
         Build method that works with Keras conventions
         """
-        if isinstance(input_shape, (list, tuple)):
-            a_shape, b_shape = input_shape[:2]
-        else:
-            # If single shape provided, assume both sequences have same shape
-            a_shape = b_shape = input_shape
 
         # Build the attention layers with correct shapes
         for block in self.attention_blocks:
-            block.build([a_shape, b_shape])
+            block.build(a_shape, b_shape)
 
-        super().build(input_shape)
+        super().build((a_shape, b_shape))
 
     def call(self, a, b, a_mask, b_mask, training=None):
         """
