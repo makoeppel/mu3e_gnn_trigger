@@ -36,13 +36,24 @@ from src.model.components import (
     MLP,
 )
 
-pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
-mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
+from src.model.components import (
+    SelfAttentionStack,
+    SelfAttentionBlock,
+    CrossAttentionBlock,
+    PoolingAttentionBlock,
+    MultiHeadAttentionBlock,
+    GenerateMask,
+    MLP,
+)
 
-feature_dim = 8
-num_heads = 6
+feature_dim = 16
+num_heads = 8
+latent_dim = 8
+num_seeds = 1
 dropout_rate = 0
 
+pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
+mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
 pixel_mask = GenerateMask(name="mask")(pixel_input)
 pixel_embedding = MLP(
     num_layers=4,
@@ -52,14 +63,6 @@ pixel_embedding = MLP(
     dropout_rate=dropout_rate,
 )(pixel_input)
 
-pixel_self_attention = SelfAttentionStack(
-    num_heads=num_heads,
-    key_dim=feature_dim,
-    stack_size = 3,
-    name="pixel_self_attention",
-    dropout_rate=dropout_rate,
-    pre_ln=True,
-)(pixel_embedding , mask = pixel_mask)
 mppc_mask = GenerateMask(name="mppc_mask")(mppc_input)
 mppc_embedding = MLP(
     num_layers=4,
@@ -68,55 +71,49 @@ mppc_embedding = MLP(
     name="mppc_embedding",
     dropout_rate=dropout_rate,
 )(mppc_input)
-mppc_self_attention = SelfAttentionStack(
+
+comb_seq = keras.layers.Concatenate(name="comb_seq", axis = 1)([pixel_embedding, mppc_embedding])
+comb_mask = keras.layers.Concatenate(name="comb_mask", axis = 1)([pixel_mask, mppc_mask])
+comb_self_attention = SelfAttentionStack(
+    stack_size=3,
     num_heads=num_heads,
     key_dim=feature_dim,
-    stack_size = 3,
-    name="mppc_self_attention",
     dropout_rate=dropout_rate,
-    pre_ln=True,
-)(mppc_embedding , mask = mppc_mask)
+    name="comb_self_attention",
+)(comb_seq, comb_mask)
 
-pixel_attend_mppc, mppc_attend_pixel, _, _ = CrossAttentionStack(
+comb_pooling_attention = PoolingAttentionBlock(
     num_heads=num_heads,
     key_dim=feature_dim,
-    name="cross_attention",
+    num_seeds=num_seeds,
     dropout_rate=dropout_rate,
-    stack_size = 2,
-    pre_ln=True,
-)([pixel_self_attention, mppc_self_attention, pixel_mask, mppc_mask])
+    name="comb_pooling_attention",
+)(comb_self_attention, comb_mask)
 
-
-pixel_pooling = PoolingAttentionBlock(
-    num_seeds = 1,
-    key_dim=feature_dim,
-    name="pooling_attention",
+comb_latent_dim = MLP(
+    num_layers=2,
+    output_dim=latent_dim,
+    activation="relu",
+    name="comb_latent_dim",
     dropout_rate=dropout_rate,
-)(pixel_attend_mppc, mask=pixel_mask)
+)(comb_pooling_attention)
 
-mppc_pooling = PoolingAttentionBlock(
-    num_seeds = 1,
-    key_dim=feature_dim,
-    name="mppc_pooling_attention",
-    dropout_rate=dropout_rate,
-)(mppc_attend_pixel, mask=mppc_mask)
+flat_latent_dim = keras.layers.Flatten(name="flat_latent_dim")(comb_latent_dim)
 
-
-latent_space = keras.layers.Concatenate(name="latent_space")([pixel_pooling, mppc_pooling])
-latent_space = keras.layers.Flatten(name="flatten")(latent_space)
 output = MLP(
-    num_layers=4,
+    num_layers=3,
     output_dim=1,
     activation="sigmoid",
     name="output",
     dropout_rate=dropout_rate,
-)(latent_space)
+)(flat_latent_dim)
 
 model = keras.Model(
     inputs=[pixel_input, mppc_input],
     outputs=output,
-    name="ClassificationModel",
+    name="mu3e_trigger_model",
 )
+
 from sklearn.model_selection import train_test_split
 
 (
