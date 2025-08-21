@@ -11,7 +11,7 @@ ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
-MODEL_NAME = "multi_class_classification"
+MODEL_NAME = "classification_single_seq"
 
 os.makedirs(f"{MODEL_DIR}/{MODEL_NAME}", exist_ok=True)
 
@@ -50,6 +50,16 @@ from src.model.components import (
     MLP,
 )
 
+from src.model.components import (
+    SelfAttentionStack,
+    SelfAttentionBlock,
+    CrossAttentionBlock,
+    PoolingAttentionBlock,
+    MultiHeadAttentionBlock,
+    GenerateMask,
+    MLP,
+)
+
 feature_dim = 16
 num_heads = 8
 latent_dim = 8
@@ -68,7 +78,6 @@ pixel_embedding = MLP(
 )(pixel_input)
 
 mppc_mask = GenerateMask(name="mppc_mask")(mppc_input)
-
 mppc_embedding = MLP(
     num_layers=4,
     output_dim=feature_dim,
@@ -80,7 +89,7 @@ mppc_embedding = MLP(
 comb_seq = keras.layers.Concatenate(name="comb_seq", axis = 1)([pixel_embedding, mppc_embedding])
 comb_mask = keras.layers.Concatenate(name="comb_mask", axis = 1)([pixel_mask, mppc_mask])
 comb_self_attention = SelfAttentionStack(
-    stack_size=3,
+    stack_size=2,
     num_heads=num_heads,
     key_dim=feature_dim,
     dropout_rate=dropout_rate,
@@ -95,15 +104,7 @@ comb_pooling_attention = PoolingAttentionBlock(
     name="comb_pooling_attention",
 )(comb_self_attention, comb_mask)
 
-comb_latent_dim = MLP(
-    num_layers=2,
-    output_dim=latent_dim,
-    activation="relu",
-    name="comb_latent_dim",
-    dropout_rate=dropout_rate,
-)(comb_pooling_attention)
-
-flat_latent_dim = keras.layers.Flatten(name="flat_latent_dim")(comb_latent_dim)
+flat_pooled = keras.layers.Flatten(name="flat_pooled")(comb_pooling_attention)
 
 output = MLP(
     num_layers=3,
@@ -111,7 +112,7 @@ output = MLP(
     activation="sigmoid",
     name="output",
     dropout_rate=dropout_rate,
-)(flat_latent_dim)
+)(flat_pooled)
 
 model = keras.Model(
     inputs=[pixel_input, mppc_input],
@@ -211,7 +212,6 @@ seq_length_mlp.compile(
     loss=keras.losses.BinaryCrossentropy(),
     metrics=[keras.metrics.BinaryAccuracy()],
 )
-seq_length_mlp.summary()
 
 
 seq_length_mlp.fit(
