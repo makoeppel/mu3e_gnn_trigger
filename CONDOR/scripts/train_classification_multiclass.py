@@ -6,9 +6,11 @@ import sklearn as sk
 import sys
 import seaborn as sns
 import os
+
 sys.path.append("../")
+
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
-DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
+DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
 MODEL_NAME = "multi_class_classification"
@@ -126,8 +128,7 @@ pixel_attend_mppc, mppc_attend_pixel = CrossAttentionStack(
     name="cross_attention",
     dropout_rate=dropout_rate,
     pre_ln=True,
-)(pixel_self_attention, mppc_self_attention, 
-    a_mask=pixel_mask, b_mask=mppc_mask)
+)(pixel_self_attention, mppc_self_attention, a_mask=pixel_mask, b_mask=mppc_mask)
 
 
 pixel_pooling = PoolingAttentionBlock(
@@ -164,9 +165,7 @@ model = keras.Model(
 )
 
 model.compile(
-    optimizer=keras.optimizers.Lion(
-        learning_rate = 1e-4
-    ),
+    optimizer=keras.optimizers.Lion(learning_rate=1e-4),
     loss=keras.losses.CategoricalCrossentropy(),
     metrics=[keras.metrics.CategoricalAccuracy()],
 )

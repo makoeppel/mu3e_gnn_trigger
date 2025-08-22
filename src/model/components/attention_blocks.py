@@ -24,7 +24,9 @@ import tensorflow as tf
 from keras import layers, regularizers
 
 
-@keras.utils.register_keras_serializable(package="Custom", name="MultiHeadAttentionBlock")
+@keras.utils.register_keras_serializable(
+    package="Custom", name="MultiHeadAttentionBlock"
+)
 class MultiHeadAttentionBlock(layers.Layer):
     def __init__(
         self,
@@ -184,7 +186,7 @@ class MultiHeadAttentionBlock(layers.Layer):
         else:
             return x + ffn_out
 
-    def build(self, query_shape, value_shape, key_shape = None):
+    def build(self, query_shape, value_shape, key_shape=None):
         """Fixed build method for Keras compatibility"""
         if key_shape is None:
             key_shape = value_shape
@@ -196,7 +198,9 @@ class MultiHeadAttentionBlock(layers.Layer):
             self.ln_ffn.build(query_shape)
 
         self.attn.build(query_shape, value_shape, key_shape)
-        self.ffn_dense_1.build((None, None, self.key_dim))  # Use None for flexible batch/seq dims
+        self.ffn_dense_1.build(
+            (None, None, self.key_dim)
+        )  # Use None for flexible batch/seq dims
         self.ffn_dense_2.build((None, None, self.ff_dim))
 
         super().build(query_shape)
@@ -618,7 +622,7 @@ class CrossAttentionStack(layers.Layer):
             for i in range(stack_size)
         ]
 
-    def build(self, a_shape, b_shape ):
+    def build(self, a_shape, b_shape):
         """
         Build method that works with Keras conventions
         """

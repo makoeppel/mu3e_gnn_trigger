@@ -10,11 +10,6 @@ uproot
 ipython
 jupyter
 seaborn
+torch
 torcheval
 torch-geometric
-torch-sparse
-torch-cluster
-torch-spline-conv
-networkx
-torch
-ogb

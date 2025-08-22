@@ -23,9 +23,8 @@ import torch
 from torch_geometric.data import Data
 from torch_geometric.nn import knn_graph
 
-#ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
-ROOT_DIR = "../"
-DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
+ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
+DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
 MODEL_NAME = "classification_single_seq"
@@ -89,9 +88,7 @@ def set_to_graph(features, label):
         return None  # skip empty graphs
     y = torch.nn.functional.one_hot(
         torch.tensor([label], dtype=torch.long), num_classes=2
-    ).type(
-        torch.float
-    )
+    ).type(torch.float)
     return Data(x=x, y=y)
 
 
@@ -327,9 +324,9 @@ for epoch in range(1):
         device_batch_data = batch_data.to(device)
         with torch.no_grad():
             out = model(device_batch_data).to("cpu")
-            val_losses.append(criterion(out,  y).item())
-            auc_metric.update(out, torch.argmax( y, dim=-1))
-            accuracy_metric.update(out, torch.argmax( y, dim=-1))
+            val_losses.append(criterion(out, y).item())
+            auc_metric.update(out, torch.argmax(y, dim=-1))
+            accuracy_metric.update(out, torch.argmax(y, dim=-1))
     val_loss_mean = np.mean(val_losses)
     train_loss_mean = np.mean(train_losses)
     history["loss"].append(loss.item())
@@ -368,6 +365,7 @@ fig.savefig(f"{PLOTS_DIR}/gnn_training_history.png")
 
 # Plot the ROC curve
 from sklearn.metrics import roc_curve, auc
+
 model.eval()
 all_labels = []
 all_probs = []

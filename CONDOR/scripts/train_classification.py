@@ -6,9 +6,10 @@ import sklearn as sk
 import sys
 import seaborn as sns
 import os
+
 sys.path.append("../")
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
-DATA_DIR = f"{ROOT_DIR}/mu3e_trigger_data"
+DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
 MODEL_NAME = "classification_single_seq"
@@ -86,8 +87,10 @@ mppc_embedding = MLP(
     dropout_rate=dropout_rate,
 )(mppc_input)
 
-comb_seq = keras.layers.Concatenate(name="comb_seq", axis = 1)([pixel_embedding, mppc_embedding])
-comb_mask = keras.layers.Concatenate(name="comb_mask", axis = 1)([pixel_mask, mppc_mask])
+comb_seq = keras.layers.Concatenate(name="comb_seq", axis=1)(
+    [pixel_embedding, mppc_embedding]
+)
+comb_mask = keras.layers.Concatenate(name="comb_mask", axis=1)([pixel_mask, mppc_mask])
 comb_self_attention = SelfAttentionStack(
     stack_size=2,
     num_heads=num_heads,
@@ -156,19 +159,21 @@ model.fit(
         keras.callbacks.EarlyStopping(
             monitor="val_loss", patience=10, restore_best_weights=True
         ),
-    keras.callbacks.ModelCheckpoint(
+        keras.callbacks.ModelCheckpoint(
             filepath=f"{MODEL_DIR}/{MODEL_NAME}/" + "{epoch:02d}-{val_loss:.2f}.keras",
             save_best_only=True,
             monitor="val_loss",
             mode="min",
         ),
-
     ],
-    class_weight = {label: 1/np.mean(y_train == label) for label in np.unique(y_train)}
+    class_weight={label: 1 / np.mean(y_train == label) for label in np.unique(y_train)},
 )
 
 
-keras.Model.save(model, f"{MODEL_DIR}/{MODEL_NAME}/" + "final_model.keras",)
+keras.Model.save(
+    model,
+    f"{MODEL_DIR}/{MODEL_NAME}/" + "final_model.keras",
+)
 
 
 hahatest_seq_length = (X_pixel_test != -1).all(axis=-1).sum(axis=-1) + (

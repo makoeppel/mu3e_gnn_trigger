@@ -217,8 +217,8 @@ def ContrastSamples(
             continue
 
         candidates = np.where(
-            (np.abs(bg_pixel_lengths - pixel_length) <= hit_diff_tolerance) & 
-            (np.abs(bg_mppc_lengths - mppc_length) <= hit_diff_tolerance)
+            (np.abs(bg_pixel_lengths - pixel_length) <= hit_diff_tolerance)
+            & (np.abs(bg_mppc_lengths - mppc_length) <= hit_diff_tolerance)
         )[0]
         if candidates.size == 0:
             continue

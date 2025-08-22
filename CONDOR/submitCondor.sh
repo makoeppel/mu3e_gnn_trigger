@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "Working dir: $PWD"
-source ~/mu3e_trigger/venv/bin/activate
+source /data/dust/group/atlas/ttreco/venv/bin/activate
 
 echo "Command: $@"
 eval "$@"
