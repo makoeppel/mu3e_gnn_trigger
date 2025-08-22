@@ -7,8 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 from torch_geometric.data import Data
-from torch_geometric.nn import GCNConv, EdgeConv, DynamicEdgeConv
+from torch_geometric.nn import DynamicEdgeConv
 from torcheval.metrics import MulticlassAUROC, MulticlassAccuracy
+from tqdm import tqdm
 
 
 sys.path.append("../")
@@ -276,7 +277,6 @@ class GNN(nn.Module):
         x = self.fc(x).squeeze()
         return F.log_softmax(x, dim=-1)
 
-
 def get_class_weights(loader):
     labels = []
     for batch_data in loader:
@@ -291,62 +291,66 @@ def get_class_weights(loader):
 
 
 model = GNN(in_dim=5, hidden_dim=20, num_classes=2).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-criterion = nn.CrossEntropyLoss(weight=get_class_weights(loader)).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+criterion = nn.CrossEntropyLoss(weight=get_class_weights(loader).to(device)).to(device)
+val_criterion = nn.CrossEntropyLoss(weight=get_class_weights(loader)).to("cpu")
 
-print(
-    f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters."
-)
+print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters.")
 
 auc_metric = MulticlassAUROC(num_classes=2)
 accuracy_metric = MulticlassAccuracy(num_classes=2)
 metrics = {"auc": auc_metric, "accuracy": accuracy_metric}
-history = {"loss": [], "val_loss": []}
-history.update({"val_" + metric: [] for metric in metrics.keys()})
-# Move model and criterion to the appropriate device
-criterion
 
-for epoch in range(1):
-    auc_metric.reset()  # Reset metric at the start of each epoch
-    accuracy_metric.reset()
+history = {"loss": [], "val_loss": []}
+history.update({f"val_{name}": [] for name in metrics.keys()})
+
+epochs = 30
+for epoch in range(epochs):
+    model.train()
     train_losses = []
-    for batch_data in loader:
+    for batch_data in tqdm(loader, desc=f"Epoch {epoch} [Train]"):
         batch_data = batch_data.to(device)
         optimizer.zero_grad()
         out = model(batch_data)
-        loss = criterion(out, batch_data.y)
+        y_true = batch_data.y.argmax(dim=-1)
+        loss = criterion(out, y_true)
         loss.backward()
         optimizer.step()
-        train_losses.append(loss.to("cpu").item())
-    val_losses = []
-    for device_batch_data in val_loader:
-        y = batch_data.y
-        device_batch_data = batch_data.to(device)
-        with torch.no_grad():
-            out = model(device_batch_data).to("cpu")
-            val_losses.append(criterion(out, y).item())
-            auc_metric.update(out, torch.argmax(y, dim=-1))
-            accuracy_metric.update(out, torch.argmax(y, dim=-1))
-    val_loss_mean = np.mean(val_losses)
+        train_losses.append(loss.item())
     train_loss_mean = np.mean(train_losses)
-    history["loss"].append(loss.item())
-    history["val_loss"].append(val_loss_mean.item())
+
+    model.eval()
+    val_losses = []
+    auc_metric.reset()
+    accuracy_metric.reset()
+    for batch_data in tqdm(val_loader, desc=f"Epoch {epoch} [Val]"):
+        batch_data = batch_data.to(device)
+        y_true = batch_data.y.argmax(dim=-1)
+        with torch.no_grad():
+            out = model(batch_data)
+            loss = val_criterion(out.to("cpu"), batch_data.y.to("cpu").argmax(dim=-1))
+            val_losses.append(loss.item())
+            auc_metric.update(out, y_true)
+            accuracy_metric.update(out, y_true)
+    val_loss_mean = np.mean(val_losses)
+
+    # === Log metrics ===
+    history["loss"].append(train_loss_mean)
+    history["val_loss"].append(val_loss_mean)
     for name, metric in metrics.items():
-        history["val_" + name].append(metric.compute().item())
+        history[f"val_{name}"].append(metric.compute().item())
+
     print(
-        f"Epoch {epoch}, Loss {train_loss_mean.item():.4f}, Val Loss {val_loss_mean.item():.4f}, "
-        + ", ".join(
-            [
-                f"Val {name.upper()} {metric.compute().item():.4f}"
-                for name, metric in metrics.items()
-            ]
-        )
+        f"Epoch {epoch+1}/{epochs} | "
+        f"Train Loss: {train_loss_mean:.4f} | "
+        f"Val Loss: {val_loss_mean:.4f} | "
+        + ", ".join([f"Val {name.upper()}: {history[f'val_{name}'][-1]:.4f}" for name in metrics.keys()])
     )
 
-# Save the model
+
 torch.save(model.state_dict(), f"{MODEL_DIR}/gnn_model.pth")
 
-# Plot training and validation loss
+
 fig, ax = plt.subplots(len(metrics) + 1, 1, figsize=(8, 6 * (len(metrics) + 1)))
 if len(metrics) == 0:
     ax = [ax]
@@ -363,7 +367,6 @@ for i, (name, _) in enumerate(metrics.items(), start=1):
 fig.tight_layout()
 fig.savefig(f"{PLOTS_DIR}/gnn_training_history.png")
 
-# Plot the ROC curve
 from sklearn.metrics import roc_curve, auc
 
 model.eval()
