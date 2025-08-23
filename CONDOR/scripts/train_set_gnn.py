@@ -2,27 +2,27 @@ import numpy as np
 import sys
 import matplotlib.pyplot as plt
 import torch
-import torch_geometric
 import torch.nn as nn
 import torch.nn.functional as F
 import os
-from torch_geometric.data import Data
-from torch_geometric.nn import DynamicEdgeConv
-from torcheval.metrics import MulticlassAUROC, MulticlassAccuracy
 from tqdm import tqdm
+from itertools import combinations
+from torcheval.metrics import MulticlassAUROC, MulticlassAccuracy
+from torch_geometric.nn import MessagePassing, global_mean_pool, global_max_pool
+from torch_geometric.data import Data, Batch
 
+sys.path.append("/afs/desy.de/user/a/aulich/mu3e_trigger")
 
-sys.path.append("../")
+from torch_src.model.components import get_mlp, TransformerBlock, PoolerTransformerBlock
 
 if torch.cuda.is_available():
+    print("CUDA is available. Using GPU.")
+    print(torch.cuda.get_device_name(0))
     device = torch.device("cuda")
 else:
+    print("CUDA is not available. Using CPU.")
     device = torch.device("cpu")
-print(f"Using device: {device}")
 
-import torch
-from torch_geometric.data import Data
-from torch_geometric.nn import knn_graph
 
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
@@ -32,20 +32,9 @@ MODEL_NAME = "classification_single_seq"
 
 os.makedirs(f"{MODEL_DIR}/{MODEL_NAME}", exist_ok=True)
 
-SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
-BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
-SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_mppc_spacetime.npy"
-BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_mppc_spacetime.npy"
-SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
-SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_mppc_spacetime.npy"
-
-
-DATA_DIR = "../mu3e_trigger_data"
-MODEL_DIR = "../models"
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_with_layer_pixel_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_with_layer_pixel_spacetime.npy"
 SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_with_layer_only_pixel_spacetime.npy"
-
 
 bg_pixel_spacetime = np.load(BACKGROUND_PIXEL_FILE)
 sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
@@ -53,45 +42,24 @@ sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
 
 # Only use pixel data
 X = np.concatenate([bg_pixel_spacetime, sig_pixel_spacetime], axis=0)
-y = np.concatenate([np.zeros(len(bg_pixel_spacetime)),np.ones(len(sig_pixel_spacetime))], axis=0)
+y = np.concatenate(
+    [
+        np.zeros(len(bg_pixel_spacetime), dtype=int),
+        np.ones(len(sig_pixel_spacetime), dtype=int),
+    ],
+    axis=0,
+)
 
 shuffled_indices = np.random.permutation(len(X))
 X = X[shuffled_indices]
 y = y[shuffled_indices]
 
 
-radii = []
-layers = []
-for event in X:
-    mask = event[:, -1] != -1  # Assuming time is the last column
-    positions = event[mask][:, :2]  # Assuming x, y, z are the first three columns
-    layer = event[mask][:, -2]
-    radius = np.linalg.norm(positions, axis=1)
-    radii.append(radius.flatten())
-    layers.append(layer.flatten())
-radii = np.concatenate(radii)
-layers = np.concatenate(layers)
-
-fig, ax = plt.subplots(figsize=(10, 6))
-for layer in np.unique(layers):
-    mask = layers == layer
-    ax.hist(radii[mask], bins=50, alpha=0.5, label=f'Layer {int(layer)}', density=True)
-ax.set_xlabel('Radius')
-ax.set_ylabel('Frequency')
-ax.set_title('Radius Distribution by Layer')
-ax.legend()
-plt.show()
-
-
-import torch
-from torch_geometric.data import Data, Batch
-from itertools import combinations
-
-def batch_events_to_variable_graphs(events : torch.Tensor) -> Batch:
+def batch_events_to_variable_graphs(events: torch.Tensor) -> Batch:
     """
     Convert a batch of events (padded) to a single PyG Batch object with variable number of graphs per event.
     Time is assumed to be at the last column (-1).
-    
+
     Args:
         events (torch.Tensor): [num_events, num_hits, feature_dim] padded with -1
                                last column must be time
@@ -115,8 +83,6 @@ def batch_events_to_variable_graphs(events : torch.Tensor) -> Batch:
             masked_positions = positions[mask]
             masked_layers = layers[mask]
             num_nodes = masked_positions.size(0)
-            if num_nodes == 0:
-                continue
 
             edges = []
             for u, v in combinations(range(num_nodes), 2):
@@ -151,14 +117,29 @@ class EventDataset(Dataset):
         self.y = y
         self.num_classes = num_classes
 
-
     def __len__(self):
         return len(self.X)
 
     def __getitem__(self, idx):
-        return torch.tensor(self.X[idx], dtype=torch.float), torch.nn.functional.one_hot(torch.tensor(self.y[idx], dtype=torch.long), num_classes=self.num_classes).float()
+        return (
+            torch.tensor(self.X[idx], dtype=torch.float),
+            torch.nn.functional.one_hot(
+                torch.tensor(self.y[idx], dtype=torch.long),
+                num_classes=self.num_classes,
+            ).float(),
+        )
     
-class GraphSetDataLoader:
+    def get_class_weights(self):
+            labels = self.y
+            class_sample_count = torch.tensor(
+                [(labels == t).sum() for t in np.arange(self.num_classes)]
+            )
+            weight = 1.0 / class_sample_count.float()
+            class_weights = weight / weight.sum()
+            return class_weights
+
+
+class GraphSetDataLoader(DataLoader):
     def __init__(self, dataset, batch_size=32, shuffle=True):
         self.dataset = dataset
         self.batch_size = batch_size
@@ -170,19 +151,26 @@ class GraphSetDataLoader:
             np.random.shuffle(indices)
 
         for start_idx in range(0, len(self.dataset), self.batch_size):
-            batch_indices = indices[start_idx:min(start_idx + self.batch_size, len(self.dataset))]
+            batch_indices = indices[
+                start_idx : min(start_idx + self.batch_size, len(self.dataset))
+            ]
             batch_events = [self.dataset[i][0] for i in batch_indices]
             batch_labels = torch.stack([self.dataset[i][1] for i in batch_indices])
-            padded_events = torch.nn.utils.rnn.pad_sequence(batch_events, batch_first=True, padding_value=-1)
+            padded_events = torch.nn.utils.rnn.pad_sequence(
+                batch_events, batch_first=True, padding_value=-1
+            )
             batch_graphs = batch_events_to_variable_graphs(padded_events)
             yield batch_graphs, batch_labels
 
     def __len__(self):
-        return (len(self.dataset) + self.batch_size - 1) // self.batch_size  # Ceiling division
-    
+        return (
+            len(self.dataset) + self.batch_size - 1
+        ) // self.batch_size  # Ceiling division
+
 
 import torch
 from torch import nn
+
 
 class SequenceGNNClassifier(nn.Module):
     def __init__(self, gnn: nn.Module, classifier_module: nn.Module):
@@ -204,31 +192,32 @@ class SequenceGNNClassifier(nn.Module):
         Returns:
             - classifier_outputs: [num_events, num_classes]
         """
-        x, edge_index, graph_batch, event_batch = batch.x, batch.edge_index, batch.batch, batch.event_batch
-        graph_embeddings = self.gnn(x, edge_index, graph_batch)  # [num_graphs_total, embed_dim]
+        x, edge_index, graph_batch, event_batch = (
+            batch.x,
+            batch.edge_index,
+            batch.batch,
+            batch.event_batch,
+        )
+        graph_embeddings = self.gnn(
+            x, edge_index, graph_batch
+        )  # [num_graphs_total, embed_dim]
 
-        if not hasattr(batch, 'event_batch'):
+        if not hasattr(batch, "event_batch"):
             raise ValueError("Batch must have 'event_batch' attribute")
 
-        classifier_outputs = self.classifier_module(graph_embeddings, event_batch)  # [num_events, num_classes]
-        return classifier_outputs # [num_events, num_classes]
-
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_geometric.nn import MessagePassing, global_mean_pool, global_max_pool
-from torch_geometric.utils import add_self_loops
+        classifier_outputs = self.classifier_module(
+            graph_embeddings, event_batch
+        )  # [num_events, num_classes]
+        return classifier_outputs  # [num_events, num_classes]
 
 
 class EdgeWeightGenerator(nn.Module):
     """First layer: learns initial edge weights from node pairs."""
+
     def __init__(self, in_dim, hidden_dim=64):
         super().__init__()
         self.edge_mlp = nn.Sequential(
-            nn.Linear(2 * in_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(2 * in_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, x, edge_index):
@@ -240,12 +229,11 @@ class EdgeWeightGenerator(nn.Module):
 
 class WeightedMessagePassing(MessagePassing):
     """Message passing layer that uses edge weights."""
+
     def __init__(self, in_dim, out_dim):
         super().__init__(aggr="add")
         self.node_mlp = nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-            nn.ReLU(),
-            nn.Linear(out_dim, out_dim)
+            nn.Linear(in_dim, out_dim), nn.ReLU(), nn.Linear(out_dim, out_dim)
         )
 
     def forward(self, x, edge_index, edge_weight):
@@ -257,12 +245,11 @@ class WeightedMessagePassing(MessagePassing):
 
 class EdgeWeightUpdater(nn.Module):
     """Recomputes new edge weights after some message passing."""
+
     def __init__(self, node_dim, hidden_dim=64):
         super().__init__()
         self.edge_mlp = nn.Sequential(
-            nn.Linear(2 * node_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(2 * node_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, x, edge_index):
@@ -304,7 +291,6 @@ class GraphEmbedder(nn.Module):
         return self.fc(x)
 
 
-from torch_src.model.components import get_mlp, TransformerBlock, PoolerTransformerBlock
 
 class SequenceClassifier(nn.Module):
     def __init__(self, input_dim, hidden_dim=16, num_classes=2):
@@ -327,26 +313,30 @@ class SequenceClassifier(nn.Module):
         x = self.pooler(x, event_batch)
         logits = self.classifier(x)
         return nn.functional.softmax(logits, dim=-1)
-    
+
 
 graph_set_classifier = SequenceGNNClassifier(
     gnn=GraphEmbedder(in_dim=3, hidden_dim=10, emb_dim=16),
-    classifier_module=SequenceClassifier(input_dim=16, hidden_dim=16, num_classes=2)
+    classifier_module=SequenceClassifier(input_dim=16, hidden_dim=16, num_classes=2),
 ).to(device)
 
 # Example forward pass
-print(f"Model has {sum(p.numel() for p in graph_set_classifier.parameters() if p.requires_grad)} trainable parameters")
+print(
+    f"Model has {sum(p.numel() for p in graph_set_classifier.parameters() if p.requires_grad)} trainable parameters"
+)
 
 
 from sklearn.model_selection import train_test_split
+
 X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 train_dataset = EventDataset(X_train, y_train, shuffle=True, num_classes=2)
 val_dataset = EventDataset(X_val, y_val, shuffle=False, num_classes=2)
 train_loader = GraphSetDataLoader(train_dataset, batch_size=512, shuffle=True)
 val_loader = GraphSetDataLoader(val_dataset, batch_size=512, shuffle=False)
 
+print(train_dataset.get_class_weights())
 
-loss_fn = nn.CrossEntropyLoss()
+loss_fn = nn.CrossEntropyLoss(train_dataset.get_class_weights().to(device))
 optimizer = torch.optim.Adam(graph_set_classifier.parameters(), lr=1e-4)
 auc_metric = MulticlassAUROC(num_classes=2)
 acc_metric = MulticlassAccuracy(num_classes=2)
@@ -385,20 +375,25 @@ for epoch in range(10):
             batch_labels = batch_labels.detach().cpu()
             all_preds.append(outputs)
             all_labels.append(batch_labels)
-            auc_metric.update(outputs, batch_labels)
-            acc_metric.update(outputs, batch_labels)
+            labels = batch_labels.argmax(dim=-1)
+            auc_metric.update(outputs, labels)
+            acc_metric.update(outputs, labels)
     avg_val_loss = total_val_loss / len(val_dataset)
     all_preds = torch.cat(all_preds, dim=0)
     all_labels = torch.cat(all_labels, dim=0)
     val_auc = auc_metric.compute().item()
     val_acc = acc_metric.compute().item()
-    print(f"Epoch {epoch+1}, Val Loss: {avg_val_loss:.4f}, Val AUC: {val_auc:.4f}, Val Acc: {val_acc:.4f}")
+    print(
+        f"Epoch {epoch+1}, Val Loss: {avg_val_loss:.4f}, Val AUC: {val_auc:.4f}, Val Acc: {val_acc:.4f}"
+    )
     history["val_loss"].append(avg_val_loss)
     history["val_auc"].append(val_auc)
     history["val_acc"].append(val_acc)
     # Save model checkpoint
-    torch.save(graph_set_classifier.state_dict(), f"{MODEL_DIR}/graph_set_classifier_epoch{epoch+1}.pth")
-
+    torch.save(
+        graph_set_classifier.state_dict(),
+        f"{MODEL_DIR}/graph_set_classifier_epoch{epoch+1}.pth",
+    )
 
 torch.save(graph_set_classifier.state_dict(), f"{MODEL_DIR}/set_gnn_model.pth")
 
@@ -424,16 +419,18 @@ fig.savefig(f"{PLOTS_DIR}/set_gnn_training_history.png")
 
 
 from sklearn.metrics import roc_curve, auc
+
 graph_set_classifier.eval()
 all_labels = []
 all_probs = []
 with torch.no_grad():
-    for batch_data in val_loader:
-        batch_data = batch_data.to(device)
-        out = graph_set_classifier(batch_data)
+    for graph_set_batch, label_batch in val_loader:
+        graph_set_batch = graph_set_batch.to(device)
+        label_batch = label_batch.to(device)
+        out = graph_set_classifier(graph_set_batch)
         probs = torch.softmax(out, dim=-1)[:, 1]  # Probability of the positive class
-        all_probs.append(probs.cpu().numpy())
-        all_labels.append(batch_data.y.cpu().numpy())
+        all_probs.append(probs.detach().numpy())
+        all_labels.append(label_batch.detach().numpy())
 all_probs = np.concatenate(all_probs)
 all_labels = np.concatenate(all_labels).argmax(axis=-1)
 fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
