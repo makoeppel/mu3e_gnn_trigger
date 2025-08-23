@@ -10,6 +10,8 @@ from itertools import combinations
 from torcheval.metrics import MulticlassAUROC, MulticlassAccuracy
 from torch_geometric.nn import MessagePassing, global_mean_pool, global_max_pool
 from torch_geometric.data import Data, Batch
+from torch_geometric.utils import add_self_loops, softmax
+
 
 sys.path.append("/afs/desy.de/user/a/aulich/mu3e_trigger")
 
@@ -210,30 +212,35 @@ class SequenceGNNClassifier(nn.Module):
         )  # [num_events, num_classes]
         return classifier_outputs  # [num_events, num_classes]
 
-
 class EdgeWeightGenerator(nn.Module):
     """First layer: learns initial edge weights from node pairs."""
-
     def __init__(self, in_dim, hidden_dim=64):
         super().__init__()
         self.edge_mlp = nn.Sequential(
-            nn.Linear(2 * in_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1)
+            nn.Linear(2 * in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, x, edge_index):
         src, dst = edge_index
         edge_feat = torch.cat([x[src], x[dst]], dim=-1)
-        edge_weight = torch.sigmoid(self.edge_mlp(edge_feat))  # [num_edges, 1]
-        return edge_weight.squeeze(-1)
+        edge_weight = self.edge_mlp(edge_feat).squeeze(-1)  # [num_edges]
+
+        # Normalize per source node (softmax like GAT)
+        edge_weight = softmax(edge_weight, src)
+
+        return edge_weight
 
 
 class WeightedMessagePassing(MessagePassing):
-    """Message passing layer that uses edge weights."""
-
+    """Message passing layer that uses learned edge weights."""
     def __init__(self, in_dim, out_dim):
         super().__init__(aggr="add")
         self.node_mlp = nn.Sequential(
-            nn.Linear(in_dim, out_dim), nn.ReLU(), nn.Linear(out_dim, out_dim)
+            nn.Linear(in_dim, out_dim),
+            nn.ReLU(),
+            nn.Linear(out_dim, out_dim)
         )
 
     def forward(self, x, edge_index, edge_weight):
@@ -245,22 +252,27 @@ class WeightedMessagePassing(MessagePassing):
 
 class EdgeWeightUpdater(nn.Module):
     """Recomputes new edge weights after some message passing."""
-
     def __init__(self, node_dim, hidden_dim=64):
         super().__init__()
         self.edge_mlp = nn.Sequential(
-            nn.Linear(2 * node_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1)
+            nn.Linear(2 * node_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, x, edge_index):
         src, dst = edge_index
         edge_feat = torch.cat([x[src], x[dst]], dim=-1)
-        new_weight = torch.sigmoid(self.edge_mlp(edge_feat))
-        return new_weight.squeeze(-1)
+        new_weight = self.edge_mlp(edge_feat).squeeze(-1)
+
+        # Normalize per source node
+        new_weight = softmax(new_weight, src)
+
+        return new_weight
 
 
 class GraphEmbedder(nn.Module):
-    def __init__(self, in_dim, hidden_dim=64, emb_dim=128):
+    def __init__(self, in_dim, hidden_dim=64, emb_dim=128, add_self_loops_flag=True):
         super().__init__()
         self.edge_init = EdgeWeightGenerator(in_dim, hidden_dim)
         self.conv1 = WeightedMessagePassing(in_dim, hidden_dim)
@@ -269,8 +281,15 @@ class GraphEmbedder(nn.Module):
         self.conv2 = WeightedMessagePassing(hidden_dim, hidden_dim)
 
         self.fc = nn.Linear(2 * hidden_dim, emb_dim)
+        self.add_self_loops_flag = add_self_loops_flag
 
     def forward(self, x, edge_index, batch):
+        num_nodes = x.size(0)
+
+        # Optionally add self-loops
+        if self.add_self_loops_flag:
+            edge_index, _ = add_self_loops(edge_index, num_nodes=num_nodes)
+
         # 1. Generate initial edge weights
         edge_weight = self.edge_init(x, edge_index)
 
@@ -337,7 +356,7 @@ val_loader = GraphSetDataLoader(val_dataset, batch_size=512, shuffle=False)
 print(train_dataset.get_class_weights())
 
 loss_fn = nn.CrossEntropyLoss(train_dataset.get_class_weights().to(device))
-optimizer = torch.optim.Adam(graph_set_classifier.parameters(), lr=1e-4)
+optimizer = torch.optim.AdamW(graph_set_classifier.parameters(), lr=1e-4)
 auc_metric = MulticlassAUROC(num_classes=2)
 acc_metric = MulticlassAccuracy(num_classes=2)
 
