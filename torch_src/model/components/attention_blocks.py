@@ -70,7 +70,7 @@ class SelfAttentionBlock(nn.Module):
             out[mask] = out_b
 
         # Merge heads
-        out = out.contiguous().view(N, self.embed_dim)  # [N, embed_dim]
+        out = out.contiguous().view(N, self.key_dim)  # [N, key_dim]
         # Final linear projection
         out = self.out_proj(out)
         return out
@@ -163,7 +163,7 @@ class TransformerBlock(nn.Module):
     Transformer block with multi-head self-attention and feedforward network.
     """
 
-    def __init__(self, key_dim, num_heads, ff_hidden_dim, dropout=0.0):
+    def __init__(self, key_dim, num_heads, ff_hidden_dim = None, dropout=0.0):
         super().__init__()
         if ff_hidden_dim is None:
             ff_hidden_dim = key_dim * 2
@@ -193,11 +193,11 @@ class PoolerTransformerBlock(nn.Module):
     Transformer block with attention pooling and feedforward network.
     """
 
-    def __init__(self, key_dim, num_heads, ff_hidden_dim=None, dropout=0.0):
+    def __init__(self, key_dim, num_heads, num_seeds = 1, ff_hidden_dim=None, dropout=0.0):
         super().__init__()
         if ff_hidden_dim is None:
             ff_hidden_dim = key_dim * 2
-        self.attention_pool = AttentionPoolingBlock(key_dim, num_heads, dropout)
+        self.attention_pool = AttentionPoolingBlock(key_dim, num_heads, num_seeds=num_seeds, dropout = dropout)
         self.norm1 = nn.LayerNorm(key_dim)
         self.ffn = nn.Sequential(
             nn.Linear(key_dim, ff_hidden_dim),
