@@ -329,7 +329,7 @@ class SequenceClassifier(nn.Module):
         """
         x = self.embedding_layer(graph_embeddings)
         x = self.transformer(x, event_batch)
-        x = self.pooler(x, event_batch)
+        x = self.pooler(x, event_batch).view(-1, self.embedding_dim)
         logits = self.classifier(x)
         return nn.functional.softmax(logits, dim=-1)
 
@@ -344,121 +344,283 @@ print(
     f"Model has {sum(p.numel() for p in graph_set_classifier.parameters() if p.requires_grad)} trainable parameters"
 )
 
-
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-
-X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-train_dataset = EventDataset(X_train, y_train, shuffle=True, num_classes=2)
-val_dataset = EventDataset(X_val, y_val, shuffle=False, num_classes=2)
-train_loader = GraphSetDataLoader(train_dataset, batch_size=512, shuffle=True)
-val_loader = GraphSetDataLoader(val_dataset, batch_size=512, shuffle=False)
-
-print(train_dataset.get_class_weights())
-
-loss_fn = nn.CrossEntropyLoss(train_dataset.get_class_weights().to(device))
-optimizer = torch.optim.AdamW(graph_set_classifier.parameters(), lr=1e-4)
-auc_metric = MulticlassAUROC(num_classes=2)
-acc_metric = MulticlassAccuracy(num_classes=2)
-
-
-history = {"train_loss": [], "val_loss": [], "val_auc": [], "val_acc": []}
-for epoch in range(10):
-    graph_set_classifier.train()
-    total_loss = 0
-    for batch_graphs, batch_labels in tqdm(train_loader, desc=f"Epoch {epoch} [Train]"):
-        batch_graphs = batch_graphs.to(device)
-        batch_labels = batch_labels.to(device)
-        optimizer.zero_grad()
-        outputs = graph_set_classifier(batch_graphs)
-        loss = loss_fn(outputs, batch_labels)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * batch_labels.size(0)
-    avg_loss = total_loss / len(train_dataset)
-    print(f"Epoch {epoch+1}, Train Loss: {avg_loss:.4f}")
-    history["train_loss"].append(avg_loss)
-    graph_set_classifier.eval()
-    total_val_loss = 0
-    all_preds = []
-    all_labels = []
-    auc_metric.reset()
-    acc_metric.reset()
-    with torch.no_grad():
-        for batch_graphs, batch_labels in val_loader:
-            batch_graphs = batch_graphs.to(device)
-            batch_labels = batch_labels.to(device)
-            outputs = graph_set_classifier(batch_graphs)
-            loss = loss_fn(outputs, batch_labels)
-            total_val_loss += loss.item() * batch_labels.size(0)
-            outputs = outputs.detach().cpu()
-            batch_labels = batch_labels.detach().cpu()
-            all_preds.append(outputs)
-            all_labels.append(batch_labels)
-            labels = batch_labels.argmax(dim=-1)
-            auc_metric.update(outputs, labels)
-            acc_metric.update(outputs, labels)
-    avg_val_loss = total_val_loss / len(val_dataset)
-    all_preds = torch.cat(all_preds, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)
-    val_auc = auc_metric.compute().item()
-    val_acc = acc_metric.compute().item()
-    print(
-        f"Epoch {epoch+1}, Val Loss: {avg_val_loss:.4f}, Val AUC: {val_auc:.4f}, Val Acc: {val_acc:.4f}"
-    )
-    history["val_loss"].append(avg_val_loss)
-    history["val_auc"].append(val_auc)
-    history["val_acc"].append(val_acc)
-    # Save model checkpoint
-    torch.save(
-        graph_set_classifier.state_dict(),
-        f"{MODEL_DIR}/graph_set_classifier_epoch{epoch+1}.pth",
-    )
-
-torch.save(graph_set_classifier.state_dict(), f"{MODEL_DIR}/set_gnn_model.pth")
-
-
-fig, ax = plt.subplots(1, 3, figsize=(18, 5))
-ax[0].plot(history["train_loss"], label="Train Loss")
-ax[0].plot(history["val_loss"], label="Val Loss")
-ax[0].set_xlabel("Epoch")
-ax[0].set_ylabel("Loss")
-ax[0].set_title("Training and Validation Loss")
-ax[0].legend()
-ax[1].plot(history["val_auc"], label="Val AUC", color="orange")
-ax[1].set_xlabel("Epoch")
-ax[1].set_ylabel("AUC")
-ax[1].set_title("Validation AUC")
-ax[1].legend()
-ax[2].plot(history["val_acc"], label="Val Accuracy", color="green")
-ax[2].set_xlabel("Epoch")
-ax[2].set_ylabel("Accuracy")
-ax[2].set_title("Validation Accuracy")
-ax[2].legend()
-fig.savefig(f"{PLOTS_DIR}/set_gnn_training_history.png")
-
-
 from sklearn.metrics import roc_curve, auc
+from tqdm import tqdm
+import os
 
-graph_set_classifier.eval()
-all_labels = []
-all_probs = []
-with torch.no_grad():
-    for graph_set_batch, label_batch in val_loader:
-        graph_set_batch = graph_set_batch.to(device)
-        label_batch = label_batch.to(device)
-        out = graph_set_classifier(graph_set_batch)
-        probs = torch.softmax(out, dim=-1)[:, 1]  # Probability of the positive class
-        all_probs.append(probs.detach().numpy())
-        all_labels.append(label_batch.detach().numpy())
-all_probs = np.concatenate(all_probs)
-all_labels = np.concatenate(all_labels).argmax(axis=-1)
-fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
-roc_auc = auc(fpr, tpr)
-fig, ax = plt.subplots(figsize=(8, 6))
-ax.plot(fpr, tpr, color="blue", label="ROC curve (area = {:.2f})".format(roc_auc))
-ax.plot([0, 1], [0, 1], color="red", linestyle="--")
-ax.set_xlabel("False Positive Rate")
-ax.set_ylabel("True Positive Rate")
-ax.set_title("Receiver Operating Characteristic (ROC) Curve")
-ax.legend()
-fig.savefig(f"{PLOTS_DIR}/set_gnn_roc_curve.png")
+
+class ModelTrainer:
+    """Handles training, validation, and evaluation of graph set classifier models."""
+    
+    def __init__(self, model, device, model_dir="models", plots_dir="plots"):
+        self.model = model
+        self.device = device
+        self.model_dir = model_dir
+        self.plots_dir = plots_dir
+        self.history = {"train_loss": [], "val_loss": [], "val_auc": [], "val_acc": []}
+        
+        # Create directories if they don't exist
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(plots_dir, exist_ok=True)
+    
+    def prepare_data(self, X, y, test_size=0.2, batch_size=512, random_state=42):
+        """Split data and create data loaders."""
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=test_size, random_state=random_state
+        )
+        
+        train_dataset = EventDataset(X_train, y_train, shuffle=True, num_classes=2)
+        val_dataset = EventDataset(X_val, y_val, shuffle=False, num_classes=2)
+        
+        train_loader = GraphSetDataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = GraphSetDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        
+        print(f"Class weights: {train_dataset.get_class_weights()}")
+        
+        return train_loader, val_loader, train_dataset, val_dataset
+    
+    def setup_training(self, train_dataset, lr=1e-4):
+        """Initialize loss function, optimizer, and metrics."""
+        class_weights = train_dataset.get_class_weights().to(self.device)
+        loss_fn = nn.CrossEntropyLoss(class_weights)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
+        
+        auc_metric = MulticlassAUROC(num_classes=2)
+        acc_metric = MulticlassAccuracy(num_classes=2)
+        
+        return loss_fn, optimizer, auc_metric, acc_metric
+    
+    def train_epoch(self, train_loader, loss_fn, optimizer):
+        """Train for one epoch."""
+        self.model.train()
+        total_loss = 0
+        num_samples = 0
+        
+        for batch_graphs, batch_labels in tqdm(train_loader, desc="Training", leave=False):
+            batch_graphs = batch_graphs.to(self.device)
+            batch_labels = batch_labels.to(self.device)
+            
+            optimizer.zero_grad()
+            outputs = self.model(batch_graphs)
+            loss = loss_fn(outputs, batch_labels)
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item() * batch_labels.size(0)
+            num_samples += batch_labels.size(0)
+        
+        return total_loss / num_samples
+    
+    def validate_epoch(self, val_loader, loss_fn, auc_metric, acc_metric):
+        """Validate for one epoch."""
+        self.model.eval()
+        total_val_loss = 0
+        num_samples = 0
+        all_preds = []
+        all_labels = []
+        
+        auc_metric.reset()
+        acc_metric.reset()
+        
+        with torch.no_grad():
+            for batch_graphs, batch_labels in tqdm(val_loader, desc="Validating", leave=False):
+                batch_graphs = batch_graphs.to(self.device)
+                batch_labels = batch_labels.to(self.device)
+                
+                outputs = self.model(batch_graphs)
+                loss = loss_fn(outputs, batch_labels)
+                
+                total_val_loss += loss.item() * batch_labels.size(0)
+                num_samples += batch_labels.size(0)
+                
+                # Move to CPU for metrics computation
+                outputs_cpu = outputs.detach().cpu()
+                labels_cpu = batch_labels.detach().cpu()
+                
+                all_preds.append(outputs_cpu)
+                all_labels.append(labels_cpu)
+                
+                # Update metrics
+                labels_argmax = labels_cpu.argmax(dim=-1)
+                auc_metric.update(outputs_cpu, labels_argmax)
+                acc_metric.update(outputs_cpu, labels_argmax)
+        
+        avg_val_loss = total_val_loss / num_samples
+        val_auc = auc_metric.compute().item()
+        val_acc = acc_metric.compute().item()
+        
+        all_preds = torch.cat(all_preds, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+        
+        return avg_val_loss, val_auc, val_acc, all_preds, all_labels
+    
+    def train(self, train_loader, val_loader, train_dataset, val_dataset, 
+              num_epochs=10, lr=1e-4, save_checkpoints=True):
+        """Main training loop."""
+        loss_fn, optimizer, auc_metric, acc_metric = self.setup_training(train_dataset, lr)
+        
+        print(f"Starting training for {num_epochs} epochs...")
+        
+        for epoch in range(num_epochs):
+            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            
+            # Training
+            train_loss = self.train_epoch(train_loader, loss_fn, optimizer)
+            self.history["train_loss"].append(train_loss)
+            
+            # Validation
+            val_loss, val_auc, val_acc, _, _ = self.validate_epoch(
+                val_loader, loss_fn, auc_metric, acc_metric
+            )
+            
+            self.history["val_loss"].append(val_loss)
+            self.history["val_auc"].append(val_auc)
+            self.history["val_acc"].append(val_acc)
+            
+            # Print metrics
+            print(f"Train Loss: {train_loss:.4f}")
+            print(f"Val Loss: {val_loss:.4f}, Val AUC: {val_auc:.4f}, Val Acc: {val_acc:.4f}")
+            
+            # Save checkpoint
+            if save_checkpoints:
+                checkpoint_path = os.path.join(self.model_dir, f"graph_set_classifier_epoch{epoch+1}.pth")
+                torch.save(self.model.state_dict(), checkpoint_path)
+        
+        # Save final model
+        final_model_path = os.path.join(self.model_dir, "set_gnn_model.pth")
+        torch.save(self.model.state_dict(), final_model_path)
+        print(f"\nTraining completed! Final model saved to {final_model_path}")
+    
+    def plot_training_history(self):
+        """Plot training history with loss, AUC, and accuracy."""
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # Loss plot
+        axes[0].plot(self.history["train_loss"], label="Train Loss", color="blue")
+        axes[0].plot(self.history["val_loss"], label="Val Loss", color="red")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Loss")
+        axes[0].set_title("Training and Validation Loss")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # AUC plot
+        axes[1].plot(self.history["val_auc"], label="Val AUC", color="orange")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("AUC")
+        axes[1].set_title("Validation AUC")
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        
+        # Accuracy plot
+        axes[2].plot(self.history["val_acc"], label="Val Accuracy", color="green")
+        axes[2].set_xlabel("Epoch")
+        axes[2].set_ylabel("Accuracy")
+        axes[2].set_title("Validation Accuracy")
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        history_plot_path = os.path.join(self.plots_dir, "set_gnn_training_history.png")
+        fig.savefig(history_plot_path, dpi=150, bbox_inches='tight')
+        print(f"Training history plot saved to {history_plot_path}")
+        plt.show()
+    
+    def plot_roc_curve(self, val_loader):
+        """Generate and plot ROC curve."""
+        self.model.eval()
+        all_labels = []
+        all_probs = []
+        
+        print("Generating ROC curve...")
+        with torch.no_grad():
+            for graph_set_batch, label_batch in tqdm(val_loader, desc="ROC computation"):
+                graph_set_batch = graph_set_batch.to(self.device)
+                label_batch = label_batch.to(self.device)
+                
+                outputs = self.model(graph_set_batch)
+                probs = torch.softmax(outputs, dim=-1)[:, 1]  # Probability of positive class
+                
+                all_probs.append(probs.cpu().numpy())
+                all_labels.append(label_batch.cpu().numpy())
+        
+        all_probs = np.concatenate(all_probs)
+        all_labels = np.concatenate(all_labels).argmax(axis=-1)
+        
+        # Compute ROC curve
+        fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+        roc_auc = auc(fpr, tpr)
+        
+        # Plot ROC curve
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(fpr, tpr, color="blue", linewidth=2, 
+                label=f"ROC curve (AUC = {roc_auc:.3f})")
+        ax.plot([0, 1], [0, 1], color="red", linestyle="--", linewidth=1, 
+                label="Random classifier")
+        
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title("Receiver Operating Characteristic (ROC) Curve")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        roc_plot_path = os.path.join(self.plots_dir, "set_gnn_roc_curve.png")
+        fig.savefig(roc_plot_path, dpi=150, bbox_inches='tight')
+        print(f"ROC curve plot saved to {roc_plot_path}")
+        plt.show()
+        
+        return roc_auc
+
+
+def main_training_pipeline(
+        model=graph_set_classifier,
+        X=X,
+        y=y,
+        device=device,
+        model_dir=MODEL_DIR,
+        plots_dir=PLOTS_DIR,
+        num_epochs=10,
+        lr=1e-4,
+        **kwargs
+    ):
+    trainer = ModelTrainer(model, device,model_dir=model_dir,plots_dir=plots_dir,  **kwargs)
+    # Prepare data
+    train_loader, val_loader, train_dataset, val_dataset = trainer.prepare_data(X, y)
+    
+    # Train model
+    trainer.train(train_loader, val_loader, train_dataset, val_dataset, num_epochs=num_epochs, lr=lr)
+    
+    # Generate plots
+    trainer.plot_training_history()
+    roc_auc = trainer.plot_roc_curve(val_loader)
+    
+    print(f"\nFinal Results:")
+    print(f"Best Validation AUC: {max(trainer.history['val_auc']):.4f}")
+    print(f"Best Validation Accuracy: {max(trainer.history['val_acc']):.4f}")
+    print(f"Final ROC AUC: {roc_auc:.4f}")
+
+    torch.save(model.state_dict(), os.path.join(model_dir, "final_set_gnn_model.pth"))
+
+    return trainer
+
+
+# Example usage:
+if __name__ == "__main__":
+    # Assuming you have these defined:
+    # graph_set_classifier, X, y, device, MODEL_DIR, PLOTS_DIR
+    
+    trainer = main_training_pipeline(
+        model=graph_set_classifier,
+        X=X,
+        y=y,
+        device=device,
+        model_dir=MODEL_DIR,
+        plots_dir=PLOTS_DIR,
+        num_epochs=30,
+        lr=1e-4
+    )
