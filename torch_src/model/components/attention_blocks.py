@@ -3,10 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# Alternative implementation using torch.nn.functional.scaled_dot_product_attention
+# (Available in PyTorch 2.0+, provides additional optimizations)
 class SelfAttentionBlock(nn.Module):
     """
-    Multi-head self-attention with variable-length groups defined by batch indices.
-    Similar to torch.nn.MultiheadAttention but operates on sets/graphs.
+    Optimized version using PyTorch's built-in scaled_dot_product_attention.
+    Requires PyTorch 2.0+ but provides maximum efficiency.
     """
 
     def __init__(self, embed_dim, num_heads, dropout=0.0):
@@ -16,11 +18,36 @@ class SelfAttentionBlock(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
 
-        # Shared projections: project to Q, K, V in one go
-        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim)        
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.dropout_p = dropout
 
-        self.dropout = nn.Dropout(dropout)
+        # Cache for attention mask
+        self._cached_mask = None
+        self._cached_batch_indices = None
+
+    def _create_attention_mask(self, batch_indices):
+        """Create attention mask for SDPA (additive format)."""
+        if self._cached_batch_indices is not None and torch.equal(
+            batch_indices, self._cached_batch_indices
+        ):
+            return self._cached_mask
+
+        N = batch_indices.size(0)
+        # Create boolean mask: True where attention is allowed (same batch)
+        mask = batch_indices.unsqueeze(0) == batch_indices.unsqueeze(1)  # [N, N]
+
+        # Convert to additive mask format for SDPA
+        # Use 0.0 for allowed positions, -inf for masked positions
+        attn_mask = torch.zeros_like(
+            mask, dtype=torch.float, device=batch_indices.device
+        )
+        attn_mask.masked_fill_(~mask, float("-inf"))
+
+        self._cached_mask = attn_mask
+        self._cached_batch_indices = batch_indices.clone()
+
+        return attn_mask
 
     def forward(self, x, batch_indices):
         """
@@ -32,111 +59,179 @@ class SelfAttentionBlock(nn.Module):
         """
         N, _ = x.size()
 
-        # Project to Q, K, V and split
-        qkv = self.qkv_proj(x)  # [N, 3*embed_dim]
-        q, k, v = qkv.chunk(3, dim=-1)  # each [N, embed_dim]
+        # Project and reshape for multi-head attention
+        qkv = self.qkv_proj(x).view(N, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(1)  # each [N, num_heads, head_dim]
 
-        # Reshape for multi-head
-        q = q.view(N, self.num_heads, self.head_dim)
-        k = k.view(N, self.num_heads, self.head_dim)
-        v = v.view(N, self.num_heads, self.head_dim)
+        # Reshape to [batch_size=1, num_heads, seq_len, head_dim] for SDPA
+        # SDPA expects batch dimension first
+        q = q.unsqueeze(0).transpose(1, 2)  # [1, num_heads, N, head_dim]
+        k = k.unsqueeze(0).transpose(1, 2)  # [1, num_heads, N, head_dim]
+        v = v.unsqueeze(0).transpose(1, 2)  # [1, num_heads, N, head_dim]
 
-        out = torch.zeros_like(q)
+        # Create attention mask
+        attn_mask = self._create_attention_mask(batch_indices)  # [N, N]
 
-        # Process each group separately
-        for b in torch.unique(batch_indices):
-            mask = batch_indices == b
-            q_b, k_b, v_b = (
-                q[mask],
-                k[mask],
-                v[mask],
-            )  # [num_nodes_b, num_heads, head_dim]
-
-            # Compute scaled dot-product attention
-            attn_scores = torch.einsum("nhd,mhd->hnm", q_b, k_b) / (self.head_dim**0.5)
-            attn_probs = F.softmax(attn_scores, dim=-1)
-            attn_probs = self.dropout(attn_probs)
-
-            # Aggregate values
-            out_b = torch.einsum(
-                "hnm,mhd->nhd", attn_probs, v_b
-            )  # [num_nodes_b, num_heads, head_dim]
-            out[mask] = out_b
-
-        # Merge heads back
-        out = out.reshape(N, self.embed_dim)
+        # Use built-in scaled dot product attention
+        # Note: SDPA can be sensitive to mask format and tensor layouts
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=False,
+        )
+        # Reshape output: [1, num_heads, N, head_dim] -> [N, embed_dim]
+        out = out.squeeze(0).transpose(1, 2).contiguous().view(N, self.embed_dim)
         out = self.out_proj(out)
+
         return out
 
 
 class AttentionPoolingBlock(nn.Module):
     """
-    Multi-head attention pooling per group using batch indices.
-    Each group is pooled into one or more seed embeddings.
+    Optimized version using PyTorch's scaled_dot_product_attention.
+    Uses attention masks instead of loops for maximum efficiency.
     """
 
-    def __init__(self, embed_dim, num_heads, num_seeds=1, dropout=0.0):
+    def __init__(
+        self,
+        embed_dim,
+        num_heads,
+        num_seeds,
+        dropout=0.0,
+        seed_init="normal",
+        seed_std=0.02,
+    ):
         super().__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
         self.num_seeds = num_seeds
-
-        # Shared linear projections for K and V
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-        self.dropout = nn.Dropout(dropout)
+        self.head_dim = embed_dim // num_heads
 
         # Learnable seed vectors
-        self.seed_vectors = nn.Parameter(torch.randn(num_seeds, embed_dim))
-        # Linear to project seeds to multi-head Q
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.seed_vectors = nn.Parameter(torch.empty(num_seeds, embed_dim))
+
+        # Projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.kv_proj = nn.Linear(embed_dim, 2 * embed_dim, bias=False)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.dropout = dropout
+
+        # Initialize seeds
+        self._init_seeds(seed_init, seed_std)
+
+        # Cache for attention mask
+        self._cached_mask = None
+        self._cached_batch_indices = None
+        self._cached_num_batches = None
+
+    def _init_seeds(self, init_method, std):
+        if init_method == "normal":
+            nn.init.normal_(self.seed_vectors, mean=0.0, std=std)
+        elif init_method == "xavier":
+            nn.init.xavier_uniform_(self.seed_vectors)
+        elif init_method == "zeros":
+            nn.init.zeros_(self.seed_vectors)
+        else:
+            raise ValueError(f"Unknown initialization method: {init_method}")
+
+    def _create_pooling_attention_mask(self, batch_indices):
+        """Create boolean attention mask for SDPA."""
+        if self._cached_batch_indices is not None and torch.equal(
+            batch_indices, self._cached_batch_indices
+        ):
+            return self._cached_mask, self._cached_num_batches
+
+        unique_batches = torch.unique(batch_indices, sorted=True)
+        B = len(unique_batches)
+        N = batch_indices.size(0)
+
+        # Create mapping from batch_id to batch_index
+        batch_id_to_idx = {
+            batch_id.item(): idx for idx, batch_id in enumerate(unique_batches)
+        }
+        batch_idx_tensor = torch.tensor(
+            [batch_id_to_idx[bid.item()] for bid in batch_indices],
+            device=batch_indices.device,
+        )
+
+        # Create boolean mask for SDPA
+        seed_batch_indices = torch.arange(
+            B, device=batch_indices.device
+        ).repeat_interleave(self.num_seeds)
+        mask = seed_batch_indices.unsqueeze(1) == batch_idx_tensor.unsqueeze(
+            0
+        )  # [B * num_seeds, N]
+
+        self._cached_mask = mask
+        self._cached_batch_indices = batch_indices.clone()
+        self._cached_num_batches = B
+
+        return mask, B
 
     def forward(self, x, batch_indices):
         """
         Args:
-            x: [N, embed_dim] node embeddings
-            batch_indices: [N] group IDs
+            x: [N, embed_dim] input embeddings
+            batch_indices: [N] batch indices
+
         Returns:
-            pooled: [num_groups * num_seeds, embed_dim]
+            pooled: [B, num_seeds, embed_dim] pooled representations
         """
         N, _ = x.size()
 
-        # Project K and V once
-        K = self.k_proj(x).view(N, self.num_heads, self.head_dim)
-        V = self.v_proj(x).view(N, self.num_heads, self.head_dim)
+        # Create attention mask
+        attn_mask, B = self._create_pooling_attention_mask(batch_indices)
 
-        pooled_list = []
+        # Prepare queries from seed vectors
+        queries = (
+            self.seed_vectors.unsqueeze(0)
+            .expand(B, -1, -1)
+            .contiguous()
+            .view(B * self.num_seeds, self.embed_dim)
+        )
+        q = self.q_proj(queries)
 
-        for b in torch.unique(batch_indices):
-            mask = batch_indices == b
-            Kb, Vb = K[mask], V[mask]  # [num_nodes_b, heads, head_dim]
+        # Project keys and values
+        kv = self.kv_proj(x)
+        k, v = kv.chunk(2, dim=-1)
 
-            # Project seed vectors to Q
-            Qb = self.q_proj(self.seed_vectors).view(
-                self.num_seeds, self.num_heads, self.head_dim
-            )
-            # Scaled dot-product attention: [heads, num_seeds, num_nodes_b]
-            attn_scores = torch.einsum("shd,nhd->hsn", Qb, Kb) / (self.head_dim**0.5)
-            attn_probs = F.softmax(attn_scores, dim=-1)
-            attn_probs = self.dropout(attn_probs)
+        # Reshape for multi-head attention
+        q = q.view(B * self.num_seeds, self.num_heads, self.head_dim).transpose(0, 1)
+        k = k.view(N, self.num_heads, self.head_dim).transpose(0, 1)
+        v = v.view(N, self.num_heads, self.head_dim).transpose(0, 1)
 
-            # Weighted sum over nodes: [num_seeds, heads, head_dim]
-            pooled_b = torch.einsum("hsn,nhd->shd", attn_probs, Vb)
-            pooled_b = pooled_b.reshape(self.num_seeds, self.embed_dim)  # merge heads
-            pooled_list.append(pooled_b)
+        # Use scaled dot product attention with mask
+        pooled = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,
+        )  # [num_heads, B * num_seeds, head_dim]
 
-        # Concatenate pooled embeddings from all groups
-        pooled = torch.cat(pooled_list, dim=0)  # [num_groups*num_seeds, embed_dim]
+        # Reshape output
+        pooled = (
+            pooled.transpose(0, 1).contiguous().view(B * self.num_seeds, self.embed_dim)
+        )
+        pooled = pooled.view(B, self.num_seeds, self.embed_dim)
+
+        # Output projection
         pooled = self.out_proj(pooled)
+
         return pooled
+
 
 class TransformerBlock(nn.Module):
     """
     Standard Transformer block with multi-head self-attention and feedforward network.
     """
+
     def __init__(self, embed_dim, num_heads, ff_hidden_dim=None, dropout=0.0):
         super().__init__()
         if ff_hidden_dim is None:
