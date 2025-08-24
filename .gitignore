@@ -4,8 +4,11 @@ model_cache
 **/__pycache__/
 *.png
 *.pdf
-plots/**
+**/plots/
+**/models/
+plots_gnn/**
 models/**
+models_gnn/**
 venv/
 **/logs/
 .DS_Store
