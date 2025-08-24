@@ -16,15 +16,11 @@ uproot
 tensorflow
 keras
 
-# PyTorch (last Pascal-compatible)
-torch==2.0.1+cu118
-torchvision==0.15.2+cu118
-torchaudio==2.0.2+cu118
-torcheval==0.0.7
+# PyTorch
+torch
+torchvision
+torchaudio
+torcheval
 
-# PyTorch Geometric + CUDA ops
-torch-geometric==2.3.1
-torch-scatter==2.1.1
-torch-sparse==0.6.17
-torch-cluster==1.6.1
-torch-spline-conv==1.2.2
+# PyTorch Geometric (install separately!)
+torch-geometric
