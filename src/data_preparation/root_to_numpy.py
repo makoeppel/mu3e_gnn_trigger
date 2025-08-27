@@ -323,8 +323,7 @@ def convert_mppc_to_location(
     )
     features = [x, y, z]
     if add_layer_as_feature:
-        layer = np.full_like(x, padding_value)
-        layer[flat_mask] = 2.5  # MPPC layer is always 2.5
+        layer = np.full_like(x, 2.5, dtype=float)
         features.append(layer)
     flat_locations = locations.reshape(-1, num_features)
     flat_locations[flat_mask] = np.stack(features, axis=1)
@@ -533,7 +532,7 @@ def convert_root_to_npy(
         padding_value=padding_value,
         mc_hit_id=mppc_mc_hit_id,
         track_id=mc_track_id,
-
+        add_layer_as_feature=add_layer_as_feature,
     )
     if mppc_positions.shape[0] != mppc_id.shape[0]:
         raise ValueError("MPPC positions shape does not match MPPC ID shape.")
