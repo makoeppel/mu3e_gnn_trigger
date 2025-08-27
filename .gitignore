@@ -12,3 +12,4 @@ models_gnn/**
 venv/
 **/logs/
 .DS_Store
+install_for_cuda.sh

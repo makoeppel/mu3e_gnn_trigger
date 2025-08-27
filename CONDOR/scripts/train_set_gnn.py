@@ -20,8 +20,8 @@ from sklearn.metrics import roc_curve, auc
 
 # Add custom path for model components
 sys.path.append("/afs/desy.de/user/a/aulich/mu3e_trigger")
-from src_gnn.model.components import get_mlp, TransformerBlock, PoolerTransformerBlock
-from src_gnn.model.components.gnn import (
+from torch_src.model.components import get_mlp, TransformerBlock, PoolerTransformerBlock
+from torch_src.model.components.gnn import (
     WeightedMessagePassing,
     EdgeWeightGenerator,
     EdgeWeightUpdater,

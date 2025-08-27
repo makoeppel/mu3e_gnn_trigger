@@ -24,3 +24,6 @@ torcheval
 
 # PyTorch Geometric (install separately!)
 torch-geometric
+torch-scatter
+torch-sparse
+torch-cluster

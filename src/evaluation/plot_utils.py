@@ -88,3 +88,38 @@ def plot_latent_variable_distributions(
     fig.legend(handles, labels, loc="upper center", ncol=2)
     fig.tight_layout()
     return fig, ax_array.reshape((num_rows, num_cols))
+
+
+def bc_evluation_plots(y_true, y_pred):
+    from sklearn.metrics import (
+        roc_curve,
+        precision_recall_curve,
+        auc,
+        average_precision_score,
+    )
+
+    fpr, tpr, _ = roc_curve(y_true, y_pred)
+    roc_auc = auc(fpr, tpr)
+
+    precision, recall, _ = precision_recall_curve(y_true, y_pred)
+    pr_auc = average_precision_score(y_true, y_pred)
+
+    fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+
+    # ROC Curve
+    ax[0].plot(fpr, tpr, color="blue", label=f"ROC curve (AUC = {roc_auc:.2f})")
+    ax[0].plot([0, 1], [0, 1], color="red", linestyle="--")
+    ax[0].set_xlabel("False Positive Rate")
+    ax[0].set_ylabel("True Positive Rate")
+    ax[0].set_title("Receiver Operating Characteristic (ROC) Curve")
+    ax[0].legend(loc="lower right")
+
+    # Precision-Recall Curve
+    ax[1].plot(recall, precision, color="green", label=f"PR curve (AUC = {pr_auc:.2f})")
+    ax[1].set_xlabel("Recall")
+    ax[1].set_ylabel("Precision")
+    ax[1].set_title("Precision-Recall Curve")
+    ax[1].legend(loc="lower left")
+
+    plt.tight_layout()
+    return fig, ax
