@@ -1,7 +1,30 @@
 import torch
 import numpy
-from torch_geometric.data import Data, Dataset, Batch
+from torch_geometric.data import Data, Dataset, Batch, HeteroData
 from torch_geometric.loader import DataLoader
+
+
+def all_indices_hetero(N_src: int, N_dst: int, include_self: bool = False, same_type: bool = False):
+    """
+    Generate all possible (i, j) index pairs between two node sets.
+    
+    - N_src: number of source nodes
+    - N_dst: number of destination nodes
+    - include_self: keep diagonal if same_type=True
+    - same_type: if True, treat source and destination as the same set
+
+    Returns:
+    - row: tensor of source indices
+    - col: tensor of destination indices
+    """
+    row = torch.arange(N_src).repeat_interleave(N_dst)
+    col = torch.arange(N_dst).repeat(N_src)
+
+    if same_type and not include_self:
+        mask = row != col
+        row, col = row[mask], col[mask]
+    
+    return row, col
 
 
 # ------------------------
@@ -49,9 +72,7 @@ def pixel_hits_to_graphs(event, connect_layers=False):
         if num_nodes < 2 or torch.unique(tracks_t).numel() < 2:
             continue
 
-        row, col = torch.triu_indices(
-            num_nodes, num_nodes, offset=1, device=nodes.device
-        )
+        row, col = all_indices_hetero(num_nodes, num_nodes, include_self=False, same_type=True)
         if connect_layers:
             edge_mask = (layers_t[row] - layers_t[col]).abs() <= 1
             row, col = row[edge_mask], col[edge_mask]
@@ -65,9 +86,66 @@ def pixel_hits_to_graphs(event, connect_layers=False):
             edge_index=torch.stack([row, col], dim=0),
             edge_labels=edge_labels,
         )
+        
+        
         graphs.append(graph)
 
     return graphs
+
+
+def batch_pixel_hits_to_graph_sets(pixel, labels, connect_layers=True):
+    pixel = (
+        pixel
+        if isinstance(pixel, torch.Tensor)
+        else torch.tensor(pixel, dtype=torch.float32)
+    )
+    all_graphs = []
+    event_indices = []
+    labels_list = []
+    if pixel.shape[0] != labels.shape[0]:
+        raise ValueError("pixels and labels arrays should be same length")
+
+    for event_idx in range(pixel.size(0)):
+        graphs = pixel_hits_to_graphs(pixel[event_idx], connect_layers=connect_layers)
+        all_graphs.extend(graphs)
+        if len(graphs) != 0:
+            labels_list.append(
+                labels[event_idx]
+                if isinstance(labels, torch.Tensor)
+                else torch.tensor(labels[event_idx], dtype=torch.float)
+            )
+            event_indices.extend([event_idx] * len(graphs))
+    batched_graphs = Batch.from_data_list(all_graphs)
+    batched_graphs.event_idx = torch.tensor(event_indices, dtype=torch.long)
+    batched_graphs.y = torch.tensor(labels_list, dtype=torch.float32)
+    return batched_graphs
+
+
+def batch_pixel_hits_to_graphs(pixel, labels, connect_layers=True):
+    pixel = (
+        pixel
+        if isinstance(pixel, torch.Tensor)
+        else torch.tensor(pixel, dtype=torch.float32)
+    )
+    all_graphs = []
+    event_indices = []
+    labels_list = []
+    if pixel.shape[0] != labels.shape[0]:
+        raise ValueError("pixels and labels arrays should be same length")
+
+    for event_idx in range(pixel.size(0)):
+        graphs = pixel_hits_to_graphs(pixel[event_idx], connect_layers=connect_layers)
+        for graph in graphs:
+            graph.y = (
+                labels[event_idx]
+                if isinstance(labels, torch.Tensor)
+                else torch.tensor(labels[event_idx], dtype=torch.float)
+            )
+        all_graphs.extend(graphs)
+        if len(graphs) != 0:
+            labels_list.append(labels[event_idx])
+            event_indices.extend([event_idx] * len(graphs))
+    return all_graphs
 
 
 def full_event_to_graphs(mppc, pixel, connect_layers=True):
@@ -109,8 +187,8 @@ def full_event_to_graphs(mppc, pixel, connect_layers=True):
 
     for t in torch.unique(times_pixel):
         tm_pixel = times_pixel == t
-        tracks_t_pixel = tracks_pixel[tm_pixel]
-        layers_t_pixel = layers_pixel[tm_pixel]
+        if tm_pixel.sum() < 2:
+            continue
         nodes_pixel = torch.cat(
             [
                 positions_pixel[tm_pixel],
@@ -121,8 +199,6 @@ def full_event_to_graphs(mppc, pixel, connect_layers=True):
         )
 
         tm_mppc = mppc_cut_times == t
-        tracks_t_mppc = tracks_mppc[tm_mppc]
-        layers_t_mppc = layers_mppc[tm_mppc]
         nodes_mppc = torch.cat(
             [
                 positions_mppc[tm_mppc],
@@ -133,16 +209,15 @@ def full_event_to_graphs(mppc, pixel, connect_layers=True):
         )
 
         nodes = torch.cat([nodes_pixel, nodes_mppc], dim=0)
-        tracks_t = torch.cat([tracks_t_pixel, tracks_t_mppc], dim=0)
-        layers_t = torch.cat([layers_t_pixel, layers_t_mppc], dim=0)
+        tracks_t = torch.cat([tracks_pixel[tm_pixel], tracks_mppc[tm_mppc]], dim=0)
+        layers_t = torch.cat([layers_pixel[tm_pixel], layers_mppc[tm_mppc]], dim=0)
+        times_t = torch.cat([times_pixel[tm_pixel], times_mppc[tm_mppc]], dim=0)
 
         num_nodes = nodes.size(0)
-        if num_nodes < 2 or torch.unique(tracks_t).numel() < 2:
+        if tm_pixel.sum() < 2 or tm_mppc.sum() < 2:
             continue
 
-        row, col = torch.triu_indices(
-            num_nodes, num_nodes, offset=1, device=nodes.device
-        )
+        row, col = all_indices_hetero(num_nodes, num_nodes, include_self=True, same_type=True)
         if connect_layers:
             edge_mask = (
                 ((layers_t[row] - layers_t[col]).abs() <= 1)
@@ -152,7 +227,10 @@ def full_event_to_graphs(mppc, pixel, connect_layers=True):
                         | ((layers_t[row] == 3) & (layers_t[col] == 2))
                     )
                 )
-                & (~((layers_t[row] == 2.5) & (layers_t[col] == 2.5)))
+                & ~(
+                    ((layers_t[row] == 2.5) & (layers_t[col] == 2.5))
+                    & (torch.abs(times_t[row] - times_t[col]) > 0.1)
+                )
             )
             row, col = row[edge_mask], col[edge_mask]
         if row.numel() == 0:
@@ -165,6 +243,8 @@ def full_event_to_graphs(mppc, pixel, connect_layers=True):
             edge_index=torch.stack([row, col], dim=0),
             edge_labels=edge_labels,
         )
+        
+        
         all_graphs.append(graph)
     return all_graphs
 
@@ -230,10 +310,150 @@ def batch_full_events_to_graphs(
                 if isinstance(labels, torch.Tensor)
                 else torch.tensor(labels[event_idx], dtype=torch.float)
             )
+        if len(graphs) == 0:
+            continue
         all_graphs.extend(graphs)
         event_indices.extend([event_idx] * len(graphs))
 
     return all_graphs
+
+
+def full_event_to_hetero_graphs(mppc, pixel, connect_layers=True, mppc_timing_cutoff = 0.2):
+    mppc = (
+        mppc
+        if isinstance(mppc, torch.Tensor)
+        else torch.tensor(mppc, dtype=torch.float32)
+    )
+    pixel = (
+        pixel
+        if isinstance(pixel, torch.Tensor)
+        else torch.tensor(pixel, dtype=torch.float32)
+    )
+    if mppc.dim() == 3:
+        mppc = mppc.squeeze(0)
+    elif mppc.dim() != 2:
+        raise ValueError("mppc must be 2D or 3D tensor")
+    if pixel.dim() == 3:
+        pixel = pixel.squeeze(0)
+    elif pixel.dim() != 2:
+        raise ValueError("pixel must be 2D or 3D tensor")
+    all_graphs = []
+
+    mask_mppc = mppc[:, -1] != -1
+    mask_pixel = pixel[:, -1] != -1
+    positions_mppc = mppc[:, :3][mask_mppc]
+    tracks_mppc = mppc[:, 4][mask_mppc]
+    layers_mppc = mppc[:, 3][mask_mppc]
+    times_mppc = mppc[:, -1][mask_mppc]
+
+    positions_pixel = pixel[:, :3][mask_pixel]
+    tracks_pixel = pixel[:, 4][mask_pixel]
+    layers_pixel = pixel[:, 3][mask_pixel]
+    times_pixel = pixel[:, -1][mask_pixel]
+
+    mppc_cut_times = (times_mppc // 8) * 8
+    for t in torch.unique(times_pixel):
+        graph = HeteroData()
+        tm_pixel = times_pixel == t
+        if tm_pixel.sum() < 2:
+            continue
+        tracks_t_pixel = tracks_pixel[tm_pixel]
+        layers_t_pixel = layers_pixel[tm_pixel]
+        postions_t_pixel = positions_pixel[tm_pixel]
+
+        tm_mppc = mppc_cut_times == t
+        tracks_t_mppc = tracks_mppc[tm_mppc]
+        layers_t_mppc = layers_mppc[tm_mppc]
+        positions_t_mppc = positions_mppc[tm_mppc]
+        times_t_mppc = times_mppc[tm_mppc]
+
+        graph['pixel'].x = postions_t_pixel
+        graph['mppc'].x = torch.cat(
+            [
+                positions_t_mppc,
+                times_t_mppc.unsqueeze(1),
+            ],
+            dim=1,
+        )
+        num_pixel = postions_t_pixel.size(0)
+        num_mppc = positions_t_mppc.size(0)
+
+        # Pixel to Pixel edges
+        row, col = all_indices_hetero(num_pixel, num_pixel, include_self=False, same_type=True)
+        if connect_layers:
+            edge_mask = (layers_t_pixel[row] - layers_t_pixel[col]).abs() <= 1
+            row, col = row[edge_mask], col[edge_mask]
+        if row.numel() > 0:
+            edge_labels = ((tracks_t_pixel[row] > 0) & (tracks_t_pixel[row] == tracks_t_pixel[col])).float()
+            graph['pixel', 'to', 'pixel'].edge_index = torch.stack([row, col], dim=0)
+            graph['pixel', 'to', 'pixel'].edge_labels = edge_labels
+
+        # MPPC to MPPC edges
+        row, col = all_indices_hetero(num_mppc, num_mppc, include_self=False, same_type=True)
+        if connect_layers:
+            edge_mask = (times_t_mppc[row] - times_t_mppc[col]).abs() <= mppc_timing_cutoff
+            row, col = row[edge_mask], col[edge_mask]
+        if row.numel() > 0:
+            graph['mppc', 'to', 'mppc'].edge_index = torch.stack([row, col], dim=0)
+            edge_labels = ((tracks_t_mppc[row] > 0) & (tracks_t_mppc[row] == tracks_t_mppc[col])).float()
+            graph['mppc', 'to', 'mppc'].edge_labels = edge_labels
+    
+        # Pixel to MPPC edges
+        if num_pixel > 0 and num_mppc > 0:
+            row, col = all_indices_hetero(num_pixel, num_mppc, include_self=False, same_type=False)
+            if connect_layers:
+                edge_mask = (layers_t_pixel[row] - layers_t_mppc[col]).abs() <= 1
+                row, col = row[edge_mask], col[edge_mask]
+            if row.numel() > 0:
+                graph['pixel', 'to', 'mppc'].edge_index = torch.stack([row, col], dim=0)
+                edge_labels = ((tracks_t_pixel[row] > 0) & (tracks_t_pixel[row] == tracks_t_mppc[col])).float()
+                graph['pixel', 'to', 'mppc'].edge_labels = edge_labels
+
+            # MPPC to Pixel edges
+            row, col = all_indices_hetero(num_mppc, num_pixel, include_self=False, same_type=False)
+            if connect_layers:
+                edge_mask = (layers_t_mppc[row] - layers_t_pixel[col]).abs() <= 1
+                row, col = row[edge_mask], col[edge_mask]
+            if row.numel() > 0:
+                graph['mppc', 'to', 'pixel'].edge_index = torch.stack([row, col], dim=0)
+                edge_labels = ((tracks_t_mppc[row] > 0) & (tracks_t_mppc[row] == tracks_t_pixel[col])).float()
+                graph['mppc', 'to', 'pixel'].edge_labels = edge_labels
+
+        if len(graph.edge_types) == 0:
+            continue
+        all_graphs.append(graph)
+
+    return all_graphs
+
+
+def batch_full_events_to_hetero_graphs(
+    mppc: torch.Tensor,
+    pixel: torch.Tensor,
+    labels: torch.Tensor,
+    connect_layers=False,
+    mppc_timing_cutoff=8,
+):
+    all_graphs = []
+    event_indices = []
+
+    for event_idx in range(mppc.size(0)):
+        graphs = full_event_to_hetero_graphs(
+            mppc[event_idx],
+            pixel[event_idx],
+            connect_layers=connect_layers,
+            mppc_timing_cutoff=mppc_timing_cutoff,
+        )
+        all_graphs.extend(graphs)
+        event_indices.extend([event_idx] * len(graphs))
+
+    batch = Batch.from_data_list(all_graphs)
+    batch.event_idx = torch.tensor(event_indices, dtype=torch.long)
+    batch.y = (
+        labels.float()
+        if isinstance(labels, torch.Tensor)
+        else torch.tensor(labels, dtype=torch.float)
+    )
+    return batch
 
 
 # ------------------------
