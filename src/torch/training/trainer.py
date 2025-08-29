@@ -7,18 +7,51 @@ import os
 
 from .loss import FocalLoss
 
+def get_device(device: str = "auto"):
+    """
+    Get the appropriate device for training.
+    
+    Args:
+        device (str): Device specification. Can be:
+            - "auto": Automatically detect best available device
+            - "cpu": Force CPU usage
+            - "cuda": Force CUDA GPU usage
+            - "mps": Force Apple Silicon GPU usage
+            - Specific device like "cuda:0", "cuda:1", etc.
+    
+    Returns:
+        torch.device: The device to use for training
+    """
+    if device == "auto":
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    
+    device = torch.device(device)
+    print(f"Using device: {device}")
+    
+    return device
+
 def train_graph_classifier(
     train_loader: DataLoader,
     val_loader: DataLoader,
-    model : nn.Module,
+    model: nn.Module,
     num_epochs: int = 30,
-    optimizer = None,
-    scheduler = None,
-    criterion = None,
+    optimizer=None,
+    scheduler=None,
+    criterion=None,
     MODEL_DIR: str = "./models",
-
+    MODEL_NAME: str = "best_graph_classifier",
+    device: str = "auto"
 ):
-    # Create datasets and loaders
+    # Get appropriate device
+    device = get_device(device)
+    
+    # Move model to device
+    model = model.to(device)
     
     print(
         f"Model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters."
@@ -26,7 +59,6 @@ def train_graph_classifier(
 
     if not os.path.exists(MODEL_DIR):
         os.makedirs(MODEL_DIR)
-
 
     if optimizer is None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=5e-4)
@@ -50,6 +82,9 @@ def train_graph_classifier(
         train_preds, train_labels = [], []
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            # Move batch to device
+            batch = batch.to(device)
+            
             optimizer.zero_grad()
 
             predictions = model(batch)
@@ -80,6 +115,9 @@ def train_graph_classifier(
 
         with torch.no_grad():
             for batch in val_loader:
+                # Move batch to device
+                batch = batch.to(device)
+                
                 predictions = model(batch)
                 loss = criterion(predictions, batch.y)
 
@@ -87,11 +125,11 @@ def train_graph_classifier(
                 val_preds.extend(predictions.cpu().numpy())
                 val_labels.extend(batch.y.cpu().numpy())
 
-
         val_preds = torch.tensor(val_preds)
         val_labels = torch.tensor(val_labels)
         if torch.std(val_preds)/(torch.mean(val_preds)+1e-6) < 0.01:
-            print(f"Warning: Low variance in training predictions, possible mode collapse. Std: {torch.std(train_preds):.6f}, Mean: {torch.mean(train_preds):.6f}")
+            print(f"Warning: Low variance in validation predictions, possible mode collapse. Std: {torch.std(val_preds):.6f}, Mean: {torch.mean(val_preds):.6f}")
+        
         # Calculate metrics
         val_auc = roc_auc_score(val_labels, val_preds)
 
@@ -108,7 +146,7 @@ def train_graph_classifier(
 
         if val_auc > best_val_auc:
             best_val_auc = val_auc
-            torch.save(model.state_dict(), f"{MODEL_DIR}/best_graph_classifier.pth")
+            torch.save(model.state_dict(), f"{MODEL_DIR}/{MODEL_NAME}.pth")
 
     print(f"Best validation AUC: {best_val_auc:.4f}")
     return model, {"train_aucs": train_aucs, "val_aucs": val_aucs}
@@ -117,14 +155,20 @@ def train_graph_classifier(
 def train_hetero_graph_classifier(
     train_loader: DataLoader,
     val_loader: DataLoader,
-    model : nn.Module,
+    model: nn.Module,
     num_epochs: int = 30,
-    optimizer = None,
-    scheduler = None,
-    criterion = None,
+    optimizer=None,
+    scheduler=None,
+    criterion=None,
     MODEL_DIR: str = "./models",
+    MODEL_NAME: str = "best_hetero_graph_classifier",
+    device: str = "auto"
+):
+    # Get appropriate device
+    device = get_device(device)
     
-):    # Create datasets and loaders
+    # Move model to device
+    model = model.to(device)
     
     print(
         f"Model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters."
@@ -132,7 +176,6 @@ def train_hetero_graph_classifier(
 
     if not os.path.exists(MODEL_DIR):
         os.makedirs(MODEL_DIR)
-
 
     if optimizer is None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=5e-4)
@@ -156,6 +199,9 @@ def train_hetero_graph_classifier(
         train_preds, train_labels = [], []
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            # Move batch to device
+            batch = batch.to(device)
+            
             optimizer.zero_grad()
 
             predictions = model(batch)
@@ -168,6 +214,12 @@ def train_hetero_graph_classifier(
             train_loss += loss.item()
             train_preds.extend(predictions.detach().cpu().numpy())
             train_labels.extend(batch.y.cpu().numpy())
+            
+        train_preds = torch.tensor(train_preds)
+        train_labels = torch.tensor(train_labels)
+        if torch.std(train_preds)/(torch.mean(train_preds)+1e-6) < 0.01:
+            print(f"Warning: Low variance in training predictions, possible mode collapse. Std: {torch.std(train_preds):.6f}, Mean: {torch.mean(train_preds):.6f}")
+        
         train_auc = roc_auc_score(train_labels, train_preds)
 
         print(
@@ -181,6 +233,9 @@ def train_hetero_graph_classifier(
 
         with torch.no_grad():
             for batch in val_loader:
+                # Move batch to device
+                batch = batch.to(device)
+                
                 predictions = model(batch)
                 loss = criterion(predictions, batch.y)
 
@@ -188,6 +243,11 @@ def train_hetero_graph_classifier(
                 val_preds.extend(predictions.cpu().numpy())
                 val_labels.extend(batch.y.cpu().numpy())
 
+        val_preds = torch.tensor(val_preds)
+        val_labels = torch.tensor(val_labels)
+        if torch.std(val_preds)/(torch.mean(val_preds)+1e-6) < 0.01:
+            print(f"Warning: Low variance in validation predictions, possible mode collapse. Std: {torch.std(val_preds):.6f}, Mean: {torch.mean(val_preds):.6f}")
+        
         # Calculate metrics
         val_auc = roc_auc_score(val_labels, val_preds)
 
@@ -204,7 +264,7 @@ def train_hetero_graph_classifier(
 
         if val_auc > best_val_auc:
             best_val_auc = val_auc
-            torch.save(model.state_dict(), f"{MODEL_DIR}/best_hetero_graph_classifier.pth")
+            torch.save(model.state_dict(), f"{MODEL_DIR}/{MODEL_NAME}.pth")
             
     print(f"Best validation AUC: {best_val_auc:.4f}")
     return model, {"train_aucs": train_aucs, "val_aucs": val_aucs}
