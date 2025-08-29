@@ -11,11 +11,12 @@ class FocalLoss(nn.Module):
         gamma (float): focusing parameter, usually 2.0
         reduction (str): 'mean', 'sum', or 'none'
     """
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean', from_logits=True):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.from_logits = from_logits
 
         if alpha is not None:
             if isinstance(alpha, (float, int)):
@@ -32,18 +33,32 @@ class FocalLoss(nn.Module):
         """
         if inputs.dim() > 1 and inputs.size(1) > 1:
             # multi-class
-            ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
-            pt = torch.exp(-ce_loss)
+            if self.from_logits:
+                ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+                pt = torch.exp(-ce_loss)
+            else:
+                # If inputs are probabilities, use NLL loss
+                log_pt = torch.log(inputs.gather(1, targets.unsqueeze(1)).squeeze(1))
+                ce_loss = -log_pt
+                pt = inputs.gather(1, targets.unsqueeze(1)).squeeze(1)
+                if self.alpha is not None:
+                    alpha_factor = self.alpha[targets]
+                    ce_loss = ce_loss * alpha_factor
         else:
-            # binary
-            inputs = inputs.view(-1)
-            targets = targets.view(-1).float()
-            ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-            pt = torch.exp(-ce_loss)
+            # binary classification
+            if self.from_logits:
+                bce_loss = F.binary_cross_entropy_with_logits(inputs, targets.float(), reduction='none')
+                pt = torch.exp(-bce_loss)
+            else:
+                bce_loss = F.binary_cross_entropy(inputs, targets.float(), reduction='none')
+                pt = inputs
+
+            ce_loss = bce_loss
             if self.alpha is not None:
-                alpha_factor = targets * self.alpha[0] + (1-targets) * self.alpha[1]
+                alpha_factor = self.alpha[targets.long()]
                 ce_loss = ce_loss * alpha_factor
 
+        # Focal loss modulation
         loss = ((1 - pt) ** self.gamma) * ce_loss
 
         if self.reduction == 'mean':

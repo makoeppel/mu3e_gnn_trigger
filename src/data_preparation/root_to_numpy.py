@@ -5,6 +5,7 @@ Functions:
 - convert_root_to_npy: Extracts spacetime data from a ROOT file and saves it to a specified directory.
 - get_image_slices_from_root: Extracts image slices from a ROOT file and saves them as NumPy arrays.
 """
+
 import uproot
 import numpy as np
 import pandas as pd
@@ -24,6 +25,7 @@ def convert_mppc_timestamp_to_ns(mppc_timestamp):
 def convert_pixel_timestamp_to_ns(pixel_timestamp):
     time_ns = pixel_timestamp * 8
     return time_ns
+
 
 def adjust_pixel_timestamps(
     timestamps: np.ndarray, padding_value: int = -1, timeframe_length=64
@@ -132,6 +134,7 @@ def reorder_nla(nla: np.ndarray, padding_value: int = -1) -> np.ndarray:
 
     return reordered_nla
 
+
 def sort_by_feature(
     data: np.ndarray, feature: np.ndarray, padding_value=-1
 ) -> np.ndarray:
@@ -174,8 +177,6 @@ def sort_by_feature(
             sorted_data[i, :n_valid] = sorted_full[i, :n_valid]
 
     return sorted_data
-
-
 
 
 def load_ak_series_to_numpy(
@@ -395,6 +396,7 @@ def convert_pid_to_location(
     valid_chip_ids = flat_chip_id[flat_valid_mask]
     valid_cols = flat_col_id[flat_valid_mask] + 0.5
     valid_rows = flat_row_id[flat_valid_mask] + 0.5
+    valid_layer_id = (((flat_chip_id // 2**10) % 4) + 1)[flat_valid_mask]
     mc_hit_id = mc_hit_id[flat_valid_mask]
 
     # Lookup transformation vectors
@@ -417,7 +419,7 @@ def convert_pid_to_location(
     x = vx + valid_cols * colx + valid_rows * rowx
     y = vy + valid_cols * coly + valid_rows * rowy
     z = vz + valid_cols * colz + valid_rows * rowz
-    layer = layer_id[flat_valid_mask]
+    layer = valid_layer_id.astype(np.float32)
 
     track_id_array = track_id[mc_hit_id].to_numpy()
 
@@ -521,8 +523,8 @@ def convert_root_to_npy(
         mc_hit_id=pixel_mc_hit_id,
         track_id=mc_track_id,
     )
-    if pixel_positions.shape[0] != pixel_hit_id.shape[0]:
-        raise ValueError("Pixel positions shape does not match pixel hit ID shape.")
+    masked_pixel_hits = np.all(pixel_positions == padding_value, axis=-1)
+    pixel_hit_timestamp[masked_pixel_hits] = padding_value
 
     # Convert MPPC IDs to positions
     mppc_positions, mppc_track_ids = convert_mppc_to_location(
@@ -534,12 +536,68 @@ def convert_root_to_npy(
         track_id=mc_track_id,
         add_layer_as_feature=add_layer_as_feature,
     )
-    if mppc_positions.shape[0] != mppc_id.shape[0]:
-        raise ValueError("MPPC positions shape does not match MPPC ID shape.")
 
     # Make sure track IDs start from 0 for each event
     if pixel_track_ids.shape != mppc_track_ids.shape:
         raise ValueError("Pixel and MPPC track ID shapes do not match.")
+    pixel_track_ids, mppc_track_ids = remap_track_ids(pixel_track_ids, mppc_track_ids)
+
+    # Adjust timestamps
+    pixel_hit_timestamp = adjust_pixel_timestamps(pixel_hit_timestamp, padding_value)
+    mppc_time = adjust_mppc_timestamps(mppc_time, padding_value)
+
+    pixel_hit_spacetime = np.concatenate(
+        [pixel_positions, pixel_track_ids[:, :, None], pixel_hit_timestamp[:, :, None]],
+        axis=-1,
+    )
+
+    mppc_hit_spacetime = np.concatenate(
+        [mppc_positions, mppc_track_ids[:, :, None], mppc_time[:, :, None]], axis=-1
+    )
+    if True:
+        # Sort pixel hits by timestamp
+        pixel_hit_spacetime = sort_by_feature(
+            pixel_hit_spacetime, pixel_hit_timestamp, padding_value=padding_value
+        )
+        mppc_hit_spacetime = sort_by_feature(
+            mppc_hit_spacetime, mppc_time, padding_value=padding_value
+        )
+        # Reorder to ensure non-padded entries are at the beginning
+        pixel_hit_spacetime = reorder_nla(
+            pixel_hit_spacetime, padding_value=padding_value
+        )
+        mppc_hit_spacetime = reorder_nla(
+            mppc_hit_spacetime, padding_value=padding_value
+        )
+
+    pixel_hit_number = (pixel_hit_spacetime != padding_value).any(axis=-1).sum(axis=-1)
+    mppc_hit_number = (mppc_hit_spacetime != padding_value).any(axis=-1).sum(axis=-1)
+
+    valid_mask = (pixel_hit_number > 0) & (mppc_hit_number > 0)
+
+    # Apply valid mask to spacetime data
+    pixel_hit_spacetime = pixel_hit_spacetime[valid_mask]
+    mppc_hit_spacetime = mppc_hit_spacetime[valid_mask]
+
+    # Save spacetime data to files
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    if add_layer_as_feature:
+        out_name += "_with_layer"
+    pixel_file_path = f"{out_dir}{out_name}_pixel_spacetime.npy"
+    mppc_file_path = f"{out_dir}{out_name}_mppc_spacetime.npy"
+    np.save(pixel_file_path, pixel_hit_spacetime)
+    np.save(mppc_file_path, mppc_hit_spacetime)
+    print(
+        f"Saved pixel spacetime to {pixel_file_path} with shape {pixel_hit_spacetime.shape}"
+    )
+    print(
+        f"Saved MPPC spacetime to {mppc_file_path} with shape {mppc_hit_spacetime.shape}"
+    )
+
+
+def remap_track_ids(pixel_track_ids, mppc_track_ids):
     mppc_mask = mppc_track_ids != 0
     pixel_mask = pixel_track_ids != 0
 
@@ -584,56 +642,7 @@ def convert_root_to_npy(
     # Reshape back to original shape
     mppc_track_ids = flat_mppc_track_ids.reshape(mppc_track_ids.shape)
     pixel_track_ids = flat_pixel_track_ids.reshape(pixel_track_ids.shape)
-
-    # Adjust timestamps
-    pixel_hit_timestamp = adjust_pixel_timestamps(pixel_hit_timestamp, padding_value)
-    mppc_time = adjust_mppc_timestamps(mppc_time, padding_value)
-
-    pixel_hit_spacetime = np.concatenate(
-        [pixel_positions, pixel_track_ids[:, :, None], pixel_hit_timestamp[:, :, None]],
-        axis=-1,
-    )
-
-    mppc_hit_spacetime = np.concatenate(
-        [mppc_positions, mppc_track_ids[:, :, None], mppc_time[:, :, None]], axis=-1
-    )
-    if True:
-        # Sort pixel hits by timestamp
-        pixel_hit_spacetime = sort_by_feature(
-            pixel_hit_spacetime, pixel_hit_timestamp, padding_value=padding_value
-        )
-        mppc_hit_spacetime = sort_by_feature(
-            mppc_hit_spacetime, mppc_time, padding_value=padding_value
-        )
-        # Reorder to ensure non-padded entries are at the beginning
-        #pixel_hit_spacetime = reorder_nla(pixel_hit_spacetime, padding_value=padding_value)
-        #mppc_hit_spacetime = reorder_nla(mppc_hit_spacetime, padding_value=padding_value)
-
-    pixel_hit_number = (pixel_hit_spacetime != padding_value).any(axis=-1).sum(axis=-1)
-    mppc_hit_number = (mppc_hit_spacetime != padding_value).any(axis=-1).sum(axis=-1)
-
-    valid_mask = (pixel_hit_number > 0) & (mppc_hit_number > 0)
-
-    # Apply valid mask to spacetime data
-    pixel_hit_spacetime = pixel_hit_spacetime[valid_mask]
-    mppc_hit_spacetime = mppc_hit_spacetime[valid_mask]
-
-    # Save spacetime data to files
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    if add_layer_as_feature:
-        out_name += "_with_layer"
-    pixel_file_path = f"{out_dir}{out_name}_pixel_spacetime.npy"
-    mppc_file_path = f"{out_dir}{out_name}_mppc_spacetime.npy"
-    np.save(pixel_file_path, pixel_hit_spacetime)
-    np.save(mppc_file_path, mppc_hit_spacetime)
-    print(
-        f"Saved pixel spacetime to {pixel_file_path} with shape {pixel_hit_spacetime.shape}"
-    )
-    print(
-        f"Saved MPPC spacetime to {mppc_file_path} with shape {mppc_hit_spacetime.shape}"
-    )
+    return pixel_track_ids, mppc_track_ids
 
 
 def get_rolled_up_sensor_hits(
