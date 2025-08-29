@@ -113,7 +113,7 @@ class PixelGraphBuilder(GraphBuilderBase):
             return None, None
 
         row, col = all_indices_hetero(
-            len(data), len(data), include_self=True, same_type=True
+            len(data), len(data), include_self=False, same_type=True
         )
 
         if self.connect_layers and row.numel() > 0:
@@ -175,7 +175,7 @@ class HeteroGraphBuilder(GraphBuilderBase):
             return None, None
 
         row, col = all_indices_hetero(
-            len(src_data), len(dst_data), include_self=True, same_type=config.same_type
+            len(src_data), len(dst_data), include_self=False, same_type=config.same_type
         )
 
         if row.numel() == 0:
@@ -289,7 +289,7 @@ class CombinedGraphBuilder(GraphBuilderBase):
             return None, None
 
         row, col = all_indices_hetero(
-            len(combined_data), len(combined_data), include_self=True, same_type=True
+            len(combined_data), len(combined_data), include_self=False, same_type=True
         )
 
         if self.connect_layers and row.numel() > 0:

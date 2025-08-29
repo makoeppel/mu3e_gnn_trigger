@@ -7,7 +7,7 @@ import os
 
 from .loss import FocalLoss
 
-def train_set_graph_classifier(
+def train_graph_classifier(
     train_loader: DataLoader,
     val_loader: DataLoader,
     model : nn.Module,

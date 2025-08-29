@@ -67,3 +67,29 @@ class FocalLoss(nn.Module):
             return loss.sum()
         else:
             return loss
+
+def get_class_weights(train_data, alpha = 2):
+    if isinstance(train_data, list):
+        data_iter = train_data
+    elif isinstance(train_data, torch.utils.data.DataLoader):
+        data_iter = train_data.dataset
+    elif hasattr(train_data, '__iter__'):
+        data_iter = train_data
+    else:
+        raise ValueError("train_data should be a list, DataLoader, or iterable of data objects.")
+
+    total_samples = 0
+    positive_samples = 0
+    for data in data_iter:
+        labels = data.y
+        total_samples += 1
+        positive_samples += labels.sum().item()
+
+    negative_samples = total_samples - positive_samples
+
+    weight_for_0 = (1 / negative_samples) * (total_samples) / 2.0
+    weight_for_1 = (1 / positive_samples) * (total_samples) / 2.0
+
+    positive_weight = weight_for_1 / weight_for_0 if weight_for_0 > 0 else 1.0
+
+    return torch.tensor(positive_weight ** alpha, dtype=torch.float)
