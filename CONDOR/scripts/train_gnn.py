@@ -8,6 +8,16 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.data import Batch, Dataset
 from tqdm import tqdm
 
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    device = torch.device("cuda")
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
+print(f"Using device: {device}")
+
+
 ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
@@ -98,11 +108,12 @@ model = SimpleGraphClassifier(
     num_conv_layers=7,
     dropout=0.2,
 )
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode="min", factor=0.5, patience=5
 )
-bce_loss = torch.nn.BCELoss(weight=get_class_weights(train_graphs).float())
+weight=get_class_weights(train_graphs).float().to(device)
+bce_loss = torch.nn.BCELoss().to(device)
 
 
 from src.torch.training import train_graph_classifier
@@ -110,7 +121,7 @@ train_loader = DataLoader(train_graphs, batch_size=512, shuffle=True)
 val_loader = DataLoader(val_graphs, batch_size=512, shuffle=False)
 
 model, aucs = train_graph_classifier(
-    train_loader, val_loader,model, num_epochs=50, optimizer=optimizer, scheduler=scheduler, criterion=bce_loss, MODEL_DIR=MODEL_DIR, MODEL_NAME="graph_classifier"
+    train_loader, val_loader,model, num_epochs=50, optimizer=optimizer, scheduler=scheduler, criterion=bce_loss, MODEL_DIR=MODEL_DIR, MODEL_NAME="graph_classifier", device=device
 )
 
 

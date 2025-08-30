@@ -18,6 +18,14 @@ SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_only_with_layer_mppc_spacetime.npy"
 BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_with_layer_pixel_spacetime.npy"
 BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_with_layer_mppc_spacetime.npy"
 
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    device = torch.device("cuda")
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
+print(f"Using device: {device}")
 
 sig_mppc_spacetime = np.load(SIGNAL_MPPC_FILE)
 sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
@@ -80,7 +88,7 @@ from src.torch.model.components import get_mlp
 
 class EventEdgeHeteroGNN(torch.nn.Module):
     def __init__(self, node_dims, edge_types, hidden_dim=32, num_layers=4, dropout=0.1,
-                 aggregation_scheme: list | str | None = None, sagpool_ratio: float = 0.5):
+                 aggregation_scheme = None, sagpool_ratio: float = 0.5):
         super(EventEdgeHeteroGNN, self).__init__()
         self.node_dims = node_dims
         self.edge_types = edge_types
@@ -228,25 +236,29 @@ def get_class_weights(train_data, alpha = 2):
     positive_weight = weight_for_1 / weight_for_0 if weight_for_0 > 0 else 1.0
 
     return torch.tensor(positive_weight ** alpha, dtype=torch.float)
-
-bce_loss = torch.nn.BCELoss(weight = get_class_weights(hetero_graph_train)) 
+weight = get_class_weights(hetero_graph_train)
+weight.to(device)
+bce_loss = torch.nn.BCELoss().to(device)
 
 import src.torch.training as train
 from importlib import reload
 
 reload(train)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-loss = train.FocalLoss(alpha=0.25, gamma=2.0, from_logits=False)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+loss = train.FocalLoss(alpha=0.25, gamma=2.0, from_logits=False).to(device)
 
 trained_model, history = train.train_graph_classifier(
     train_loader,
     test_loader,
     model,
-    20,
+    50,
     optimizer=optimizer,
     scheduler=None,
     criterion=bce_loss,
+    MODEL_DIR=MODEL_DIR,
+    MODEL_NAME="hetero_gnn",
+    device=device,
 )
 
 fig, ax = plt.subplots(figsize=(8, 5))
