@@ -157,31 +157,6 @@ class EventEdgeHeteroGNN(torch.nn.Module):
             for node_type, x in x_dict.items()
         }
 
-        # ---- Apply SAGPool on timing nodes only ----
-        if "mppc" in x_dict:
-            x_t = x_dict["mppc"]
-            edge_index_t = edge_index_dict[("mppc", "to", "mppc")]
-            batch_t = batch_dict["mppc"]
-
-            # message passing to get scores
-            x_t = self.timing_conv_for_pool((x_t, x_t), edge_index_t)
-            x_t, edge_index_t, _, batch_t, perm, _ = self.timing_pool(x_t, edge_index_t, batch_t)
-
-            # Update timing node features + subgraph
-            x_dict["mppc"] = x_t
-            edge_index_dict[("mppc", "to", "mppc")] = edge_index_t
-            batch_dict["mppc"] = batch_t
-
-            # Filter cross edges: keep only those attached to surviving timing nodes
-            for etype in edge_index_dict.keys():
-                src, rel, dst = etype
-                if src == "mppc":
-                    mask = torch.isin(edge_index_dict[etype][0], perm)
-                    edge_index_dict[etype] = edge_index_dict[etype][:, mask]
-                if dst == "mppc":
-                    mask = torch.isin(edge_index_dict[etype][1], perm)
-                    edge_index_dict[etype] = edge_index_dict[etype][:, mask]
-
         # ---- Apply HeteroConv layers ----
         for layer, conv in enumerate(self.convs):
             x_dict = conv(x_dict, edge_index_dict)
