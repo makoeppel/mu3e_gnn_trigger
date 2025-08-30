@@ -312,16 +312,20 @@ node_dims = {
 }
 edge_types = list(sample_graph.edge_index_dict.keys())
 
-model = EventEdgeHeteroGNN(
+from src.torch.model.graph_classifier import EventEdgeHeteroGNN_MultiConv
+
+model = EventEdgeHeteroGNN_MultiConv(
     node_dims=node_dims,
     edge_types=edge_types,
     hidden_dim=32,
-    num_layers=6,
+    num_layers=4,
     dropout=0.2,
-    aggregation_scheme=["mean", "mean", "max", "mean", "mean" ,"max"],
-    sagpool_ratio=0.5,
+    conv_type=["graph", "sage", "gat", "transformer"],
+    heads=[1, 1, 4, 6],
+    aggregation_scheme=["mean", "mean", "max", "add"],
+    sagpool_ratio=0.3,
+    apply_pooling_after_layer=1,
 )
-
 
 def get_class_weights(train_data, alpha = 2):
     total_samples = 0
@@ -361,7 +365,7 @@ trained_model, history = train.train_graph_classifier(
     scheduler=None,
     criterion=bce_loss,
     MODEL_DIR=MODEL_DIR,
-    MODEL_NAME="hetero_gnn",
+    MODEL_NAME="hetero_attention_gnn",
     device=device,
 )
 
