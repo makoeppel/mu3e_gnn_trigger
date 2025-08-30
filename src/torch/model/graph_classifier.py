@@ -278,7 +278,7 @@ class EventEdgeHeteroGNN_MultiConv(torch.nn.Module):
         num_layers=4,
         dropout=0.1,
         conv_type="sage",  # Single conv type OR list of conv types per layer
-        aggregation_scheme: list | str | None = None,
+        aggregation_scheme = None,
         sagpool_ratio: float = 0.5,
         apply_pooling_after_layer: int = 1,
         # Layer-specific parameters (can be single values or lists)
