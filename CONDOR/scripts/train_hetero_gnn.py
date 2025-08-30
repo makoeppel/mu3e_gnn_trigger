@@ -105,7 +105,7 @@ class EventEdgeHeteroGNN(torch.nn.Module):
         hidden_dim=32,
         num_layers=4,
         dropout=0.1,
-        aggregation_scheme: list | str | None = None,
+        aggregation_scheme = None,
         sagpool_ratio: float = 0.5,
         apply_pooling_after_layer: int = 1,  # Apply pooling after this layer
     ):
