@@ -252,6 +252,8 @@ class HeteroGraphBuilder(GraphBuilderBase):
 
             edge_index, edge_labels = self._create_edges(src_data, dst_data, config)
             self._add_edges_to_graph(graph, config, edge_index, edge_labels)
+            if edge_index is not None:
+                return None  # At least one edge type must exist
 
         return graph if len(graph.edge_types) > 0 else None
 
