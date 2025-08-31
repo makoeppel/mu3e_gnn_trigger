@@ -65,7 +65,7 @@ reload(gc)
 
 from torch_geometric.loader import DataLoader
 
-event_processor = gc.EventProcessor(gc.HeteroGraphBuilder())
+event_processor = gc.EventProcessor(gc.HeteroGraphBuilder(connect_layers=True, mppc_timing_cutoff=0.1))
 
 hetero_graph_train = event_processor.process_to_graphs(
     X_pixel=X_pixel_train, X_mppc=X_mppc_train, labels=y_train
@@ -317,13 +317,13 @@ from src.torch.model.graph_classifier import EventEdgeHeteroGNN_MultiConv
 model = EventEdgeHeteroGNN_MultiConv(
     node_dims=node_dims,
     edge_types=edge_types,
-    hidden_dim=32,
-    num_layers=4,
+    hidden_dim=48,
+    num_layers=7,
     dropout=0.2,
-    conv_type=["graph", "sage", "gat", "transformer"],
-    heads=[1, 1, 4, 6],
-    aggregation_scheme=["mean", "mean", "max", "add"],
-    sagpool_ratio=0.3,
+    conv_type=["graph", "sage", "gat", "transformer", "sage", "gat", "transformer"],
+    heads=[1, 1, 4, 6, 1, 4, 6],
+    aggregation_scheme=["mean", "mean", "max", "add", "mean", "max", "add"],
+    sagpool_ratio=0.5,
     apply_pooling_after_layer=1,
 )
 
