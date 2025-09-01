@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from torch_geometric.data import Data, Dataset, Batch, HeteroData
 from torch_geometric.loader import DataLoader
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Optional, Union, Dict
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
@@ -101,6 +101,10 @@ class GraphBuilderBase(ABC):
             times=tensor[:, -1][mask],
         )
 
+    @abstractmethod
+    def get_viable_event_indices(self, **kwargs) -> List[int]:
+        """Get indices of events that can produce at least one valid graph."""
+
 
 class PixelGraphBuilder(GraphBuilderBase):
     """Builder for pixel-only homogeneous graphs."""
@@ -167,6 +171,44 @@ class HeteroGraphBuilder(GraphBuilderBase):
             EdgeConfig("mppc", "pixel", ("mppc", "to", "pixel"), False, False, True),
         ]
 
+    def get_viable_event_indices(
+        self, pixel: torch.Tensor, mppc: torch.Tensor, min_tracks: int = 2
+    ) -> List[int]:
+        """Get indices of events that can produce at least one valid graph."""
+        viable = []
+
+        for idx in range(pixel.size(0)):
+            pixel_event = pixel[idx]
+            mppc_event = mppc[idx]
+
+            pixel_data = self._extract_detector_data(
+                self._validate_tensor(pixel_event, "pixel_event")
+            )
+            mppc_data = self._extract_detector_data(
+                self._validate_tensor(mppc_event, "mppc_event")
+            )
+
+            if len(pixel_data) < 2 or len(mppc_data) < 2:
+                continue
+
+            for t in torch.unique(pixel_data.times):
+                pixel_t = pixel_data.filter_by_time(t)
+                mppc_cut_times = (mppc_data.times // 8) * 8
+                mppc_t = DetectorData(
+                    positions=mppc_data.positions[mppc_cut_times == t],
+                    layers=mppc_data.layers[mppc_cut_times == t],
+                    tracks=mppc_data.tracks[mppc_cut_times == t],
+                    times=mppc_data.times[mppc_cut_times == t],
+                )
+
+                if not pixel_t.has_sufficient_data() or not mppc_t.has_sufficient_data():
+                    continue
+                combined_tracks = torch.cat([pixel_t.tracks, mppc_t.tracks], dim=0)
+                if torch.unique(combined_tracks).numel() >= min_tracks:
+                    viable.append(idx)
+                    break
+        return viable
+
     def _create_edges(
         self, src_data: DetectorData, dst_data: DetectorData, config: EdgeConfig
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -184,7 +226,10 @@ class HeteroGraphBuilder(GraphBuilderBase):
         # Apply layer constraints
         if self.connect_layers and config.use_layers:
             layer_diff = (src_data.layers[row] - dst_data.layers[col]).abs()
-            layer_mask = layer_diff <= 1
+            layer_mask = (layer_diff <= 1) & ~(
+                ((src_data.layers[row] == 2) & (dst_data.layers[col] == 3))
+                | ((src_data.layers[row] == 3) & (dst_data.layers[col] == 2))
+            )
             row, col = row[layer_mask], col[layer_mask]
 
         # Apply timing constraints for MPPC
@@ -253,9 +298,8 @@ class HeteroGraphBuilder(GraphBuilderBase):
             edge_index, edge_labels = self._create_edges(src_data, dst_data, config)
             self._add_edges_to_graph(graph, config, edge_index, edge_labels)
 
-
-
         return graph if len(graph.edge_types) == 4 else None
+
 
     def build_graphs_from_event(
         self, mppc: Union[torch.Tensor, any], pixel: Union[torch.Tensor, any]
@@ -275,6 +319,223 @@ class HeteroGraphBuilder(GraphBuilderBase):
 
         return graphs
 
+
+class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
+    """Builder for layer-separated heterogeneous graphs with specific connectivity pattern:
+    layer_1 <-> layer_2 <-> mppc <-> mppc <-> layer_3 <-> layer_4
+    """
+
+    def __init__(self, connect_layers: bool = True, mppc_timing_cutoff: float = 0.2):
+        super().__init__(connect_layers)
+        self.mppc_timing_cutoff = mppc_timing_cutoff
+        
+        # Define the connectivity pattern
+        self.edge_configs = [
+            # Layer connections
+            EdgeConfig("layer_1", "layer_2", ("layer_1", "to", "layer_2"), False, False, False),
+            EdgeConfig("layer_2", "layer_1", ("layer_2", "to", "layer_1"), False, False, False),
+            
+            # Layer 2 to MPPC connections
+            EdgeConfig("layer_2", "mppc", ("layer_2", "to", "mppc"), False, False, False),
+            EdgeConfig("mppc", "layer_2", ("mppc", "to", "layer_2"), False, False, False),
+            
+            # MPPC internal connections
+            EdgeConfig("mppc", "mppc", ("mppc", "to", "mppc"), True, True, False),
+            
+            # MPPC to Layer 3 connections
+            EdgeConfig("mppc", "layer_3", ("mppc", "to", "layer_3"), False, False, False),
+            EdgeConfig("layer_3", "mppc", ("layer_3", "to", "mppc"), False, False, False),
+            
+            # Layer 3 to Layer 4 connections
+            EdgeConfig("layer_3", "layer_4", ("layer_3", "to", "layer_4"), False, False, False),
+            EdgeConfig("layer_4", "layer_3", ("layer_4", "to", "layer_3"), False, False, False),
+        ]
+
+    def _separate_pixel_layers(self, pixel_data: DetectorData) -> Dict[str, DetectorData]:
+        """Separate pixel data into individual layer datasets."""
+        layer_data = {}
+        
+        for layer_id in [1, 2, 3, 4]:
+            layer_mask = pixel_data.layers == layer_id
+            if layer_mask.sum() > 0:  # Only create if we have data for this layer
+                layer_data[f"layer_{layer_id}"] = DetectorData(
+                    positions=pixel_data.positions[layer_mask],
+                    layers=pixel_data.layers[layer_mask],
+                    tracks=pixel_data.tracks[layer_mask],
+                    times=pixel_data.times[layer_mask],
+                )
+            else:
+                # Create empty DetectorData for missing layers
+                empty_tensor = torch.empty((0, 3), dtype=pixel_data.positions.dtype, 
+                                         device=pixel_data.positions.device)
+                empty_1d = torch.empty(0, dtype=pixel_data.layers.dtype,
+                                     device=pixel_data.layers.device)
+                layer_data[f"layer_{layer_id}"] = DetectorData(
+                    positions=empty_tensor,
+                    layers=empty_1d,
+                    tracks=empty_1d,
+                    times=empty_1d,
+                )
+        
+        return layer_data
+
+    def _create_edges(
+        self, src_data: DetectorData, dst_data: DetectorData, config: EdgeConfig
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Create edges between source and destination nodes."""
+        if len(src_data) == 0 or len(dst_data) == 0:
+            return None, None
+
+        # Generate all possible connections
+        src_indices = torch.arange(len(src_data))
+        dst_indices = torch.arange(len(dst_data))
+        
+        if config.same_type:
+            # For same type connections (mppc-mppc), create all pairs excluding self-connections
+            row = src_indices.repeat_interleave(len(dst_data))
+            col = dst_indices.repeat(len(src_data))
+            # Remove self connections
+            mask = row != col
+            row, col = row[mask], col[mask]
+        else:
+            # For different type connections, create all possible pairs
+            row = src_indices.repeat_interleave(len(dst_data))
+            col = dst_indices.repeat(len(src_data))
+
+        if row.numel() == 0:
+            return None, None
+
+        # Apply timing constraints for MPPC-MPPC connections
+        if config.use_timing and row.numel() > 0:
+            time_diff = (src_data.times[row] - dst_data.times[col]).abs()
+            timing_mask = time_diff <= self.mppc_timing_cutoff
+            row, col = row[timing_mask], col[timing_mask]
+
+        if row.numel() == 0:
+            return None, None
+
+        # Create edge labels (1.0 if both nodes belong to same positive track)
+        edge_labels = (
+            (src_data.tracks[row] > 0) & (src_data.tracks[row] == dst_data.tracks[col])
+        ).float()
+
+        return torch.stack([row, col], dim=0), edge_labels
+
+    def _add_edges_to_graph(
+        self,
+        graph: HeteroData,
+        config: EdgeConfig,
+        edge_index: Optional[torch.Tensor],
+        edge_labels: Optional[torch.Tensor],
+    ):
+        """Add edges to graph if they exist."""
+        if edge_index is not None and edge_labels is not None:
+            graph[config.edge_type].edge_index = edge_index
+            graph[config.edge_type].edge_labels = edge_labels
+
+    def _create_layer_separated_graph(
+        self,
+        pixel_data: DetectorData,
+        mppc_data: DetectorData,
+        time_slice: torch.Tensor,
+    ) -> Optional[HeteroData]:
+        """Create layer-separated heterogeneous graph for a specific time slice."""
+        # Filter pixel data for current time slice
+        pixel_t = pixel_data.filter_by_time(time_slice)
+        
+        # Filter MPPC data (using 8ns time bins)
+        mppc_cut_times = (mppc_data.times // 8) * 8
+        mppc_t = DetectorData(
+            positions=mppc_data.positions[mppc_cut_times == time_slice],
+            layers=mppc_data.layers[mppc_cut_times == time_slice],
+            tracks=mppc_data.tracks[mppc_cut_times == time_slice],
+            times=mppc_data.times[mppc_cut_times == time_slice],
+        )
+
+        # Separate pixel data into layers
+        layer_data = self._separate_pixel_layers(pixel_t)
+        
+        # Check if we have sufficient data - need at least some nodes in connected layers
+        has_layer_1 = len(layer_data["layer_1"]) > 0
+        has_layer_2 = len(layer_data["layer_2"]) > 0
+        has_layer_3 = len(layer_data["layer_3"]) > 0
+        has_layer_4 = len(layer_data["layer_4"]) > 0
+        has_mppc = len(mppc_t) > 0
+        
+        # Need at least a connected path through the graph
+        if not (has_layer_2 and has_mppc and has_layer_3):
+            return None
+
+        # Create graph with node features
+        graph = HeteroData()
+        
+        # Add layer nodes (only if they exist)
+        for layer_name, data in layer_data.items():
+            if len(data) > 0:
+                graph[layer_name].x = data.positions
+
+        # Add MPPC nodes (include timing information)
+        if len(mppc_t) > 0:
+            graph["mppc"].x = torch.cat([mppc_t.positions, mppc_t.times.unsqueeze(1)], dim=1)
+
+        # Create data mapping for edge creation
+        data_map = {**layer_data, "mppc": mppc_t}
+
+        # Create edges for all configured types
+        edges_added = 0
+        for config in self.edge_configs:
+            src_data = data_map[config.src_type]
+            dst_data = data_map[config.dst_type]
+
+            edge_index, edge_labels = self._create_edges(src_data, dst_data, config)
+            if edge_index is not None:
+                self._add_edges_to_graph(graph, config, edge_index, edge_labels)
+                edges_added += 1
+
+        # Only return graph if we have meaningful connectivity
+        return graph if edges_added > 0 else None
+
+    def build_graphs_from_event(
+        self, mppc: Union[torch.Tensor, any], pixel: Union[torch.Tensor, any]
+    ) -> List[HeteroData]:
+        """Build layer-separated heterogeneous graphs from a single event."""
+        mppc = self._validate_tensor(mppc, "mppc")
+        pixel = self._validate_tensor(pixel, "pixel")
+
+        pixel_data = self._extract_detector_data(pixel)
+        mppc_data = self._extract_detector_data(mppc)
+
+        graphs = []
+        for time_slice in torch.unique(pixel_data.times):
+            graph = self._create_layer_separated_graph(pixel_data, mppc_data, time_slice)
+            if graph is not None:
+                graphs.append(graph)
+
+        return graphs
+
+    def get_node_types(self) -> List[str]:
+        """Return list of node types in this graph."""
+        return ["layer_1", "layer_2", "layer_3", "layer_4", "mppc"]
+
+    def get_edge_types(self) -> List[Tuple[str, str, str]]:
+        """Return list of edge types in this graph."""
+        return [config.edge_type for config in self.edge_configs]
+
+    def print_connectivity_pattern(self):
+        """Print the connectivity pattern of this graph builder."""
+        print("Layer-Separated Heterogeneous Graph Connectivity:")
+        print("layer_1 <-> layer_2 <-> mppc <-> mppc <-> layer_3 <-> layer_4")
+        print("\nNode types:", self.get_node_types())
+        print("\nEdge types:")
+        for edge_type in self.get_edge_types():
+            print(f"  {edge_type}")
+
+    def get_viable_event_indices(self, **kwargs):
+        """Get indices of events that can produce at least one valid graph."""
+        return super().get_viable_event_indices(**kwargs)
+    
+
+    
 
 class CombinedGraphBuilder(GraphBuilderBase):
     """Builder for combined homogeneous graphs with both detector types."""
@@ -395,6 +656,38 @@ class CombinedGraphBuilder(GraphBuilderBase):
                 graphs.append(graph)
 
         return graphs
+    
+    def get_viable_event_indices(self, X_mppc, X_pixel, min_tracks: int = 2) -> List[int]:
+        """Get indices of events that can produce at least one valid graph."""
+        viable = []
+        for idx in range(X_pixel.size(0)):
+            pixel_event = X_pixel[idx]
+            mppc_event = X_mppc[idx]
+            pixel_data = self._extract_detector_data(
+                self._validate_tensor(pixel_event, "pixel_event")
+            )
+            mppc_data = self._extract_detector_data(
+                self._validate_tensor(mppc_event, "mppc_event")
+            )
+            if len(pixel_data) < 2 or len(mppc_data) < 2:
+                continue
+            mppc_cut_times = (mppc_data.times // 8) * 8
+            for t in torch.unique(pixel_data.times):
+                pixel_t = pixel_data.filter_by_time(t)
+                mppc_t = DetectorData(
+                    positions=mppc_data.positions[mppc_cut_times == t],
+                    layers=mppc_data.layers[mppc_cut_times == t],
+                    tracks=mppc_data.tracks[mppc_cut_times == t],
+                    times=mppc_data.times[mppc_cut_times == t],
+                )
+                if not pixel_t.has_sufficient_data() or not mppc_t.has_sufficient_data():
+                    continue
+                combined_tracks = torch.cat([pixel_t.tracks, mppc_t.tracks], dim=0)
+                if torch.unique(combined_tracks).numel() >= min_tracks:
+                    viable.append(idx)
+                    break
+        return viable
+        
 
 
 class EventProcessor:
@@ -403,7 +696,7 @@ class EventProcessor:
     def __init__(self, graph_builder: GraphBuilderBase):
         self.graph_builder = graph_builder
 
-    def process_single_event(self,**kwargs) -> List[Union[Data, HeteroData]]:
+    def process_single_event(self, **kwargs) -> List[Union[Data, HeteroData]]:
         """Process single event to graphs."""
         if isinstance(self.graph_builder, PixelGraphBuilder):
             if "X_pixel" not in kwargs:
@@ -411,22 +704,32 @@ class EventProcessor:
             return self.graph_builder.build_graphs_from_event(kwargs["X_pixel"])
         elif isinstance(self.graph_builder, HeteroGraphBuilder):
             if "X_pixel" not in kwargs or "X_mppc" not in kwargs:
-                raise ValueError("X_pixel and X_mppc are required for HeteroGraphBuilder")
+                raise ValueError(
+                    "X_pixel and X_mppc are required for HeteroGraphBuilder"
+                )
             return self.graph_builder.build_graphs_from_event(
                 kwargs["X_mppc"], kwargs["X_pixel"]
             )
         elif isinstance(self.graph_builder, CombinedGraphBuilder):
             if "X_pixel" not in kwargs or "X_mppc" not in kwargs:
-                raise ValueError("X_pixel and X_mppc are required for CombinedGraphBuilder")
+                raise ValueError(
+                    "X_pixel and X_mppc are required for CombinedGraphBuilder"
+                )
+            return self.graph_builder.build_graphs_from_event(
+                kwargs["X_mppc"], kwargs["X_pixel"]
+            )
+        elif isinstance(self.graph_builder, LayerSeparatedHeteroGraphBuilder):
+            if "X_pixel" not in kwargs or "X_mppc" not in kwargs:
+                raise ValueError(
+                    "X_pixel and X_mppc are required for LayerSeparatedHeteroGraphBuilder"
+                )
             return self.graph_builder.build_graphs_from_event(
                 kwargs["X_mppc"], kwargs["X_pixel"]
             )
         else:
             raise ValueError("Unsupported graph builder type")
 
-    def _validate_input_tensors(
-        self, **kwargs
-    ) -> Tuple[dict, Optional[torch.Tensor]]:
+    def _validate_input_tensors(self, **kwargs) -> Tuple[dict, Optional[torch.Tensor]]:
         """Validate and prepare input tensors."""
         input_tensors = {}
         labels = None
@@ -452,16 +755,14 @@ class EventProcessor:
 
         return input_tensors, labels
 
-    def process_graphs(
-        self, **kwargs
-    ) -> List[Union[Data, HeteroData]]:
+    def process_graphs(self, **kwargs) -> List[Union[Data, HeteroData]]:
         """Process batch of events to list of graphs with labels."""
         input_tensors, labels = self._validate_input_tensors(**kwargs)
 
         all_graphs = []
         event_indices = []
         valid_labels = []
-        
+
         num_events = next(iter(input_tensors.values())).size(0)
 
         for event_idx in range(num_events):
@@ -477,20 +778,19 @@ class EventProcessor:
                     for graph in graphs:
                         graph.y = labels[event_idx]
                     valid_labels.append(labels[event_idx])
-                
 
-        return all_graphs, torch.tensor(event_indices, dtype=torch.long), torch.stack(valid_labels) if valid_labels else None
-    
-    def process_to_graphs(
-        self, **kwargs
-    ) -> List[Union[Data, HeteroData]]:
+        return (
+            all_graphs,
+            torch.tensor(event_indices, dtype=torch.long),
+            torch.stack(valid_labels) if valid_labels else None,
+        )
+
+    def process_to_graphs(self, **kwargs) -> List[Union[Data, HeteroData]]:
         """Process batch of events to list of graphs."""
         all_graphs, _, _ = self.process_graphs(**kwargs)
         return all_graphs
 
-    def process_to_graph_set(
-        self, **kwargs
-    ) -> Optional[Batch]:
+    def process_to_graph_set(self, **kwargs) -> Optional[Batch]:
         """Process batch of events to PyTorch Geometric batch."""
         all_graphs, event_indices, valid_labels = self.process_graphs(**kwargs)
 
@@ -502,7 +802,19 @@ class EventProcessor:
         batch.y = valid_labels if valid_labels is not None else None
 
         return batch
-
+    
+    def get_viable_event_indices(
+        self, pixel: torch.Tensor, mppc: torch.Tensor, min_tracks: int = 2
+    ) -> List[int]:
+        """Get indices of events that can produce at least one valid graph."""
+        if hasattr(self.graph_builder, "get_viable_event_indices"):
+            return self.graph_builder.get_viable_event_indices(
+                pixel=pixel, mppc=mppc, min_tracks=min_tracks
+            )
+        else:
+            raise NotImplementedError(
+                "get_viable_event_indices is not implemented for this graph builder"
+            )
 
 class EventFilter:
     """Utility for filtering viable events."""

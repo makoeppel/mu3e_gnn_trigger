@@ -598,12 +598,6 @@ def convert_root_to_npy(
 
 
 def remap_track_ids(pixel_track_ids, mppc_track_ids):
-    mppc_mask = mppc_track_ids != 0
-    pixel_mask = pixel_track_ids != 0
-
-    flat_mppc_mask = mppc_mask.ravel()
-    flat_pixel_mask = pixel_mask.ravel()
-
     maxiint = max(np.max(mppc_track_ids), np.max(pixel_track_ids)) + 1
 
     # Normalize track_id to start from 0 for each event

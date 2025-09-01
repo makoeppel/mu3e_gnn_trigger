@@ -559,9 +559,11 @@ def visualize_event(event_dict, event_idx: int = 0):
         print("Matplotlib not available for visualization")
 
 
-DATA_DIR = "../mu3e_trigger_data"
-MODEL_DIR = "../models"
-PLOTS_DIR = "../plots"
+ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
+DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
+PLOTS_DIR = f"{ROOT_DIR}/plots"
+MODEL_DIR = f"{ROOT_DIR}/models"
+MODEL_NAME = "multi_class_classification"
 SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_with_layer_pixel_spacetime.npy"
 SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_with_layer_mppc_spacetime.npy"
 
