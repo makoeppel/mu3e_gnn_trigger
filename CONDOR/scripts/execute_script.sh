@@ -17,3 +17,5 @@ RequestMemory  = 40000
 transfer_executable = False
 should_transfer_files = False
 checkpoint = True
+
+queue 1
