@@ -11,16 +11,21 @@ ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
 DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
 PLOTS_DIR = f"{ROOT_DIR}/plots"
 MODEL_DIR = f"{ROOT_DIR}/models"
-MODEL_NAME = "transformer_embedding"
+MODEL_NAME = "contrastive_loss"
 
 os.makedirs(f"{MODEL_DIR}/{MODEL_NAME}", exist_ok=True)
 
-SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_pixel_spacetime.npy"
-BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_pixel_spacetime.npy"
-SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_mppc_spacetime.npy"
-BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_mppc_spacetime.npy"
-SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_pixel_spacetime.npy"
-SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_mppc_spacetime.npy"
+ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
+DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
+PLOTS_DIR = f"{ROOT_DIR}/plots"
+MODEL_DIR = f"{ROOT_DIR}/models"
+SIGNAL_PIXEL_FILE = f"{DATA_DIR}/sig_with_layer_pixel_spacetime.npy"
+SIGNAL_MPPC_FILE = f"{DATA_DIR}/sig_with_layer_mppc_spacetime.npy"
+SIGNAL_ONLY_PIXEL_FILE = f"{DATA_DIR}/sig_only_with_layer_pixel_spacetime.npy"
+SIGNAL_ONLY_MPPC_FILE = f"{DATA_DIR}/sig_only_with_layer_mppc_spacetime.npy"
+
+BACKGROUND_PIXEL_FILE = f"{DATA_DIR}/bg_with_layer_pixel_spacetime.npy"
+BACKGROUND_MPPC_FILE = f"{DATA_DIR}/bg_with_layer_mppc_spacetime.npy"
 
 bg_pixel_spacetime = np.load(BACKGROUND_PIXEL_FILE)
 bg_mppc_spacetime = np.load(BACKGROUND_MPPC_FILE)
@@ -28,6 +33,20 @@ sig_only_pixel_spacetime = np.load(SIGNAL_ONLY_PIXEL_FILE)
 sig_only_mppc_spacetime = np.load(SIGNAL_ONLY_MPPC_FILE)
 sig_pixel_spacetime = np.load(SIGNAL_PIXEL_FILE)
 sig_mppc_spacetime = np.load(SIGNAL_MPPC_FILE)
+
+def get_spacetime_data(data):
+    spatial_data = data[:, :, :3]
+    time_data = data[:,:,-1]
+    time_data = np.expand_dims(time_data, axis=-1)
+    spacetime_data = np.concatenate((spatial_data, time_data), axis=-1)
+    return spacetime_data
+
+bg_pixel_spacetime = get_spacetime_data(bg_pixel_spacetime)
+bg_mppc_spacetime = get_spacetime_data(bg_mppc_spacetime)
+sig_only_pixel_spacetime = get_spacetime_data(sig_only_pixel_spacetime)
+sig_only_mppc_spacetime = get_spacetime_data(sig_only_mppc_spacetime)
+sig_pixel_spacetime = get_spacetime_data(sig_pixel_spacetime)
+sig_mppc_spacetime = get_spacetime_data(sig_mppc_spacetime)
 
 seq_length = bg_pixel_spacetime.shape[1]
 input_dim = bg_pixel_spacetime.shape[2]
@@ -50,7 +69,7 @@ from src.utils import ContrastSamples
     padding_value=-1,
 )
 
-from src.model.components import (
+from src.keras.model.components import (
     SelfAttentionStack,
     CrossAttentionBlock,
     PoolingAttentionBlock,
@@ -64,7 +83,7 @@ latent_dim = 8
 num_seeds = 2
 dropout_rate = 0.0
 
-from src.model.components import (
+from src.keras.model.components import (
     SelfAttentionStack,
     SelfAttentionBlock,
     CrossAttentionBlock,
@@ -158,7 +177,7 @@ transformer_embedding = keras.Model(
     outputs=output,
     name="ClassificationModel",
 )
-from src.model.wrapper.siamese import make_siamese_encoder
+from src.keras.model.wrapper.siamese import make_siamese_encoder
 
 siamese_model = make_siamese_encoder(
     base_model=transformer_embedding,
@@ -166,7 +185,7 @@ siamese_model = make_siamese_encoder(
 )
 
 
-from src.training import (
+from src.keras.training import (
     TripletLoss,
     TripletLossWithRegularization,
     VarianceCovarianceLoss,
@@ -235,7 +254,7 @@ sig_pixel_train, sig_pixel_test, sig_mppc_train, sig_mppc_test = train_test_spli
 signal_latent = transformer_embedding.predict([sig_pixel_test, sig_mppc_test])
 background_latent = transformer_embedding.predict([bg_pixel_test, bg_mppc_test])
 
-from src.evaluation import plot_latent_variable_distributions
+from src.plotting.evaluation import plot_latent_variable_distributions
 
 fig, axes = plot_latent_variable_distributions(signal_latent, background_latent)
 fig.savefig(f"{PLOTS_DIR}/latent_variable_distributions.png")
