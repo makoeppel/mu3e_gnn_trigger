@@ -27,6 +27,22 @@ def cartesian_to_cylindrical(data, padding_value=-1):
     cylindrical_data[data[:, :, 0] == padding_value] = padding_value
     return cylindrical_data
 
+def get_spacetime_data(data):
+    """Extract spacetime data from input array. Function to support legacy data formats.
+    Args:
+        data (np.ndarray): Input data with shape (N, M, F) where F >= 4.
+    Returns:
+        np.ndarray: Spacetime data with shape (N, M, 4) containing (x, y, z, t).
+    """
+    if data.ndim != 3:
+        raise ValueError("Input data must be a 3D array (N, M, F).")
+    if data.shape[-1] < 4:
+        raise ValueError("Input data must have at least 4 features (x, y, z, t).")
+    space_data = data[:, :, :3]
+    time_data = data[:, :, -1].reshape(data.shape[0], data.shape[1], 1)
+    spacetime_data = np.concatenate((space_data, time_data), axis=-1)
+    return spacetime_data
+
 
 def normalize_data(
     data,

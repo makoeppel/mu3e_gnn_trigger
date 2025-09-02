@@ -39,6 +39,7 @@ class MultiHeadAttentionBlock(layers.Layer):
         regularizer=None,
         **kwargs,
     ):
+        assert key_dim % num_heads == 0, "key_dim must be divisible by num_heads"
         super().__init__(**kwargs)
         self.self_attention = self_attention
         self.pre_ln = pre_ln
@@ -62,7 +63,7 @@ class MultiHeadAttentionBlock(layers.Layer):
         # Attention
         self.attn = layers.MultiHeadAttention(
             num_heads=num_heads,
-            key_dim=key_dim,
+            key_dim=key_dim // num_heads,
             dropout=dropout_rate,
             name="multi_head_attention",
         )

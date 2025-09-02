@@ -163,7 +163,7 @@ class MultiObjectiveTrainer:
 
     @tf.function
     def train_reconstruction_step(
-        self, dataset: tf.data.Dataset, encoder_optimizer, validation_dataset=None
+        self, dataset: tf.data.Dataset, encoder_optimizer
     ):
         """Train the encoder using reconstruction loss only.
         Args:
