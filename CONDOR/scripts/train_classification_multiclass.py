@@ -73,7 +73,7 @@ pixel_input = keras.Input(shape=(input_seq_len, input_dim), name="pixel_input")
 mppc_input = keras.Input(shape=(input_seq_len, input_dim), name="mppc_input")
 
 
-from src.model.components import (
+from src.keras.model.components import (
     SelfAttentionStack,
     SelfAttentionBlock,
     CrossAttentionStack,

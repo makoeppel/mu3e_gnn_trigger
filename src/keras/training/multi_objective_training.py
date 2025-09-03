@@ -50,7 +50,7 @@ class MultiObjectiveTrainer:
 
         self.batch_size = batch_size
 
-    @tf.function
+    #@tf.function
     def train_encoder_step(
         self, dataset: tf.data.Dataset, encoder_optimizer, validation_dataset=None
     ):
@@ -90,7 +90,7 @@ class MultiObjectiveTrainer:
         mean_var_loss = total_var_loss / tf.cast(num_batches, tf.float32)
         return mean_recon_loss, mean_var_loss
 
-    @tf.function
+    #@tf.function
     def train_autoencoder_step(
         self,
         dataset: tf.data.Dataset,
@@ -107,7 +107,15 @@ class MultiObjectiveTrainer:
         """
         self.encoder.trainable = False
         self.autoencoder.trainable = True
-        latent_dataset = dataset.map(self.encoder, num_parallel_calls=tf.data.AUTOTUNE)
+        latent_dataset = []
+        for input_sample in dataset:
+            pixel_data, mppc_data = input_sample
+            z = self.encoder([pixel_data, mppc_data], training=False)
+            latent_dataset.append(z)
+        latent_dataset = tf.data.Dataset.from_tensor_slices(latent_dataset).batch(
+            self.batch_size
+        )
+        
         losses = []
         for _ in range(num_steps):
             total_recon_loss = 0.0
@@ -128,7 +136,7 @@ class MultiObjectiveTrainer:
             losses.append(total_recon_loss / tf.cast(num_batches, tf.float32))
         return losses
 
-    @tf.function
+    #@tf.function
     def train_encoder_variance_step(
         self, dataset: tf.data.Dataset, encoder_optimizer: keras.optimizers.Optimizer
     ):
@@ -145,8 +153,9 @@ class MultiObjectiveTrainer:
         total_var_loss = 0.0
 
         for input_sample in dataset:
+            pixel_data, mppc_data = input_sample
             with tf.GradientTape() as tape:
-                z = self.encoder(input_sample, training=True)
+                z = self.encoder(pixel_data, mppc_data, training=True)
                 var_loss = self.variance_loss(z, z)
                 loss = self.lambda_var * var_loss
 
@@ -161,7 +170,7 @@ class MultiObjectiveTrainer:
         mean_var_loss = total_var_loss / tf.cast(num_batches, tf.float32)
         return mean_var_loss
 
-    @tf.function
+    #@tf.function
     def train_reconstruction_step(
         self, dataset: tf.data.Dataset, encoder_optimizer
     ):
@@ -180,8 +189,9 @@ class MultiObjectiveTrainer:
         num_batches = 0
 
         for input_sample in dataset:
+            pixel_data, mppc_data = input_sample
             with tf.GradientTape() as tape:
-                z = self.encoder(input_sample, training=True)
+                z = self.encoder(pixel_data, mppc_data, training=True)
                 z_hat = self.autoencoder(z, training=False)
                 recon_loss = self.autoencoder_loss(z, z_hat)
                 loss = recon_loss
