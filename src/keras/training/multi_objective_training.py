@@ -155,7 +155,7 @@ class MultiObjectiveTrainer:
         for input_sample in dataset:
             pixel_data, mppc_data = input_sample
             with tf.GradientTape() as tape:
-                z = self.encoder(pixel_data, mppc_data, training=True)
+                z = self.encoder([pixel_data, mppc_data], training=True)
                 var_loss = self.variance_loss(z, z)
                 loss = self.lambda_var * var_loss
 
@@ -191,7 +191,7 @@ class MultiObjectiveTrainer:
         for input_sample in dataset:
             pixel_data, mppc_data = input_sample
             with tf.GradientTape() as tape:
-                z = self.encoder(pixel_data, mppc_data, training=True)
+                z = self.encoder([pixel_data, mppc_data], training=True)
                 z_hat = self.autoencoder(z, training=False)
                 recon_loss = self.autoencoder_loss(z, z_hat)
                 loss = recon_loss
