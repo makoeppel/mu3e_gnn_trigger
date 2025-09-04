@@ -132,13 +132,13 @@ pixel_train, pixel_test, mppc_train, mppc_test = train_test_split(
     random_state=42,
 )
 train_dataset = tf.data.Dataset.from_tensor_slices(
-    ([pixel_train, mppc_train])
-).shuffle(buffer_size=1024).batch(32)
+    ((pixel_train, mppc_train))
+).shuffle(buffer_size=1024).batch(512)
 test_dataset = tf.data.Dataset.from_tensor_slices(
-    ([pixel_test, mppc_test])
-).batch(32)
+    ((pixel_test, mppc_test))
+).batch(512)
 
-for epoch in range(10):
+for epoch in range(5):
     print(f"Epoch {epoch+1}")
     trainer.train_autoencoder_step(
         train_dataset, ae_optimizer, num_steps=10

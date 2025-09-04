@@ -1354,9 +1354,9 @@ def plot_score_distributions(score_dict: Dict[str, np.ndarray],
     ax.axvline(sig_mean, color='red', linestyle='--', alpha=0.8, 
                 label=f'Sig mean: {sig_mean:.3f}±{sig_std:.3f}')
     
-    ax.xlabel('Anomaly Score')
-    ax.ylabel('Density')
-    ax.title(title)
+    ax.set_xlabel('Anomaly Score')
+    ax.set_ylabel('Density')
+    ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.3)
 
