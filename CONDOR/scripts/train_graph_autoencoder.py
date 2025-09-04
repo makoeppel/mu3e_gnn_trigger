@@ -780,7 +780,7 @@ class LayerSeparatedGraphAutoencoderPipeline:
         self, 
         pixel_data: torch.Tensor, 
         mppc_data: torch.Tensor,
-        max_graphs_per_event: int = 5
+        max_graphs_per_event: int = 8
     ) -> List:
         """Create dataset of graphs from event data."""
         # Prepare features
@@ -1064,7 +1064,7 @@ def compute_anomaly_scores(
     device: torch.device = None,
     score_type: str = 'reconstruction',
     node_weights: Optional[Dict[str, float]] = None,
-    max_graphs_per_event: int = 5
+    max_graphs_per_event: int = 8
 ) -> Dict[str, np.ndarray]:
     """
     Lightweight function to compute anomaly scores for signal vs background data.
