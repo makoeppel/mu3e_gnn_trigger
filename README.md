@@ -32,16 +32,17 @@ This repository contains experimental code for training various machine learning
 3. Install the required packages:
     ```bash
     pip install -r requirements.txt
-
+    ```
     or use the provided script to install requirements including PyTorch Geometric:
     ```bash
     bash install_requirements.sh
-
+    ```
 ## Usage
 - Data Preparation:
   - Use the scripts in the `src/data_preparation` directory to preprocess raw data into numpy format.
 - Feature Plotting:
    - Use the notebooks in the `notebooks_feature_plotting` directory for visualizing and analyzing data features.
 - Model Training:
-   -Use the notebooks in the `notebooks_supervised` directory to train and evaluate different machine learning models.
+   -Use the notebooks in the `notebooks_supervised` or `notebooks_unsupervised`  directory to train and evaluate different machine learning models.
+   -To verify models on toy data, use the notebooks in the `notebooks_verification` directory.
    -For experimental setups, refer to the `notebooks_experimental` directory.

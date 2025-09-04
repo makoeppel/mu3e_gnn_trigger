@@ -1,7 +1,7 @@
 import tensorflow as tf
 import keras
 from .losses import VarianceCovarianceLoss
-
+import numpy as np
 
 class MultiObjectiveTrainer:
     """A trainer for multi-objective optimization of a fixed-size embedding encoder and autoencoder.
@@ -107,21 +107,15 @@ class MultiObjectiveTrainer:
         """
         self.encoder.trainable = False
         self.autoencoder.trainable = True
-        latent_dataset = []
-        for input_sample in dataset:
-            pixel_data, mppc_data = input_sample
-            z = self.encoder([pixel_data, mppc_data], training=False)
-            latent_dataset.append(z)
-        latent_dataset = tf.data.Dataset.from_tensor_slices(latent_dataset).batch(
-            self.batch_size
-        )
-        
+        latent_dataset = self.create_latent_dataset(dataset)
+
         losses = []
         for _ in range(num_steps):
             total_recon_loss = 0.0
             num_batches = 0
 
             for z in latent_dataset:
+                print(z.shape)
                 with tf.GradientTape() as tape:
                     z_hat = self.autoencoder(z, training=True)
                     recon_loss = self.autoencoder_loss(z, z_hat)
@@ -135,6 +129,31 @@ class MultiObjectiveTrainer:
                 num_batches += 1
             losses.append(total_recon_loss / tf.cast(num_batches, tf.float32))
         return losses
+
+    def create_latent_dataset(self, dataset):
+        latent_dataset = []
+        for input_sample in dataset:
+            pixel_data, mppc_data = input_sample
+            z = self.encoder([pixel_data, mppc_data], training=False)
+            latent_dataset.append(z)
+        if len(latent_dataset) == 0:
+            raise ValueError("The dataset is empty. Cannot train the autoencoder.")
+        elif isinstance(latent_dataset[0], tf.Tensor):
+            latent_dataset = tf.concat(latent_dataset, axis=0)
+            latent_dataset = tf.data.Dataset.from_tensor_slices(latent_dataset).batch(
+                self.batch_size
+            )
+        elif isinstance(latent_dataset[0], np.ndarray):
+            latent_dataset = np.concatenate(latent_dataset)
+            latent_dataset = tf.data.Dataset.from_tensor_slices(latent_dataset).batch(
+                self.batch_size
+            )
+        else:
+            raise ValueError(
+                "The dataset elements are neither tf.Tensor nor np.ndarray."
+            )
+            
+        return latent_dataset
 
     #@tf.function
     def train_encoder_variance_step(
