@@ -1,41 +1,29 @@
+"""
+Graph batching utilities for detector data processing.
+
+This module provides PyTorch Geometric compatible classes for building different types of graphs from detector events:
+- PixelGraphBuilder: Homogeneous graphs from pixel data only
+- HeteroGraphBuilder: Heterogeneous graphs with pixel and MPPC detectors  
+- LayerSeparatedHeteroGraphBuilder: Layer-separated heterogeneous graphs
+- CombinedGraphBuilder: Combined homogeneous graphs with both detector types
+"""
+
 import torch
 import numpy as np
-from torch_geometric.data import Data, Dataset, Batch, HeteroData
+from torch_geometric.data import Data, Dataset, Batch, HeteroData, InMemoryDataset
 from torch_geometric.loader import DataLoader
-from typing import List, Tuple, Optional, Union, Dict
+from typing import List, Tuple, Optional, Union, Dict, Any, Callable
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
-
-
-def all_indices_hetero(
-    N_src: int, N_dst: int, include_self: bool = True, same_type: bool = False
-):
-    """
-    Generate all possible (i, j) index pairs between two node sets.
-
-    Args:
-        N_src: Number of source nodes
-        N_dst: Number of destination nodes
-        include_self: Keep diagonal if same_type=True
-        same_type: If True, treat source and destination as the same set
-
-    Returns:
-        Tuple of (row, col) tensors with source and destination indices
-    """
-    row = torch.arange(N_src).repeat_interleave(N_dst)
-    col = torch.arange(N_dst).repeat(N_src)
-
-    if same_type and not include_self:
-        mask = row != col
-        row, col = row[mask], col[mask]
-
-    return row, col
+import os
+import os.path as osp
+import pickle
 
 
 @dataclass
 class DetectorData:
     """Container for detector data components."""
-
+    
     positions: torch.Tensor
     layers: torch.Tensor
     tracks: torch.Tensor
@@ -62,13 +50,36 @@ class DetectorData:
 @dataclass
 class EdgeConfig:
     """Configuration for edge creation between detector types."""
-
+    
     src_type: str
     dst_type: str
     edge_type: Tuple[str, str, str]
     same_type: bool
     use_timing: bool = False
     use_layers: bool = True
+
+
+def generate_all_pairs(n_src: int, n_dst: int, include_self: bool = True, same_type: bool = False):
+    """
+    Generate all possible (i, j) index pairs between two node sets.
+
+    Args:
+        n_src: Number of source nodes
+        n_dst: Number of destination nodes  
+        include_self: Keep diagonal if same_type=True
+        same_type: If True, treat source and destination as the same set
+
+    Returns:
+        Tuple of (row, col) tensors with source and destination indices
+    """
+    row = torch.arange(n_src).repeat_interleave(n_dst)
+    col = torch.arange(n_dst).repeat(n_src)
+
+    if same_type and not include_self:
+        mask = row != col
+        row, col = row[mask], col[mask]
+
+    return row, col
 
 
 class GraphBuilderBase(ABC):
@@ -101,24 +112,26 @@ class GraphBuilderBase(ABC):
             times=tensor[:, -1][mask],
         )
 
+    def _create_edge_labels(self, src_tracks: torch.Tensor, dst_tracks: torch.Tensor, 
+                           row: torch.Tensor, col: torch.Tensor) -> torch.Tensor:
+        """Create edge labels based on track matching."""
+        return ((src_tracks[row] > 0) & (src_tracks[row] == dst_tracks[col])).float()
+
     @abstractmethod
-    def get_viable_event_indices(self, **kwargs) -> List[int]:
-        """Get indices of events that can produce at least one valid graph."""
+    def build_graphs_from_event(self, **kwargs) -> List[Union[Data, HeteroData]]:
+        """Build graphs from event data."""
+        pass
 
 
 class PixelGraphBuilder(GraphBuilderBase):
     """Builder for pixel-only homogeneous graphs."""
 
-    def _create_pixel_edges(
-        self, data: DetectorData
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _create_pixel_edges(self, data: DetectorData) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Create edges between pixel nodes."""
         if len(data) < 2:
             return None, None
 
-        row, col = all_indices_hetero(
-            len(data), len(data), include_self=False, same_type=True
-        )
+        row, col = generate_all_pairs(len(data), len(data), include_self=False, same_type=True)
 
         if self.connect_layers and row.numel() > 0:
             edge_mask = (data.layers[row] - data.layers[col]).abs() <= 1
@@ -127,18 +140,15 @@ class PixelGraphBuilder(GraphBuilderBase):
         if row.numel() == 0:
             return None, None
 
-        # Create edge labels (1.0 if both nodes belong to same positive track)
-        edge_labels = (
-            (data.tracks[row] > 0) & (data.tracks[row] == data.tracks[col])
-        ).float()
+        edge_labels = self._create_edge_labels(data.tracks, data.tracks, row, col)
         edge_index = torch.stack([row, col], dim=0)
 
         return edge_index, edge_labels
 
-    def build_graphs_from_event(self, event: Union[torch.Tensor, any]) -> List[Data]:
+    def build_graphs_from_event(self, pixel: Union[torch.Tensor, any], **kwargs) -> List[Data]:
         """Build homogeneous graphs from pixel event data."""
-        event = self._validate_tensor(event, "event")
-        data = self._extract_detector_data(event)
+        pixel = self._validate_tensor(pixel, "pixel")
+        data = self._extract_detector_data(pixel)
 
         graphs = []
         for time_slice in torch.unique(data.times):
@@ -151,7 +161,9 @@ class PixelGraphBuilder(GraphBuilderBase):
 
             if edge_index is not None:
                 graph = Data(
-                    x=data_t.positions, edge_index=edge_index, edge_labels=edge_labels
+                    x=data_t.positions, 
+                    edge_index=edge_index, 
+                    edge_labels=edge_labels
                 )
                 graphs.append(graph)
 
@@ -171,54 +183,14 @@ class HeteroGraphBuilder(GraphBuilderBase):
             EdgeConfig("mppc", "pixel", ("mppc", "to", "pixel"), False, False, True),
         ]
 
-    def get_viable_event_indices(
-        self, pixel: torch.Tensor, mppc: torch.Tensor, min_tracks: int = 2
-    ) -> List[int]:
-        """Get indices of events that can produce at least one valid graph."""
-        viable = []
-
-        for idx in range(pixel.size(0)):
-            pixel_event = pixel[idx]
-            mppc_event = mppc[idx]
-
-            pixel_data = self._extract_detector_data(
-                self._validate_tensor(pixel_event, "pixel_event")
-            )
-            mppc_data = self._extract_detector_data(
-                self._validate_tensor(mppc_event, "mppc_event")
-            )
-
-            if len(pixel_data) < 2 or len(mppc_data) < 2:
-                continue
-
-            for t in torch.unique(pixel_data.times):
-                pixel_t = pixel_data.filter_by_time(t)
-                mppc_cut_times = (mppc_data.times // 8) * 8
-                mppc_t = DetectorData(
-                    positions=mppc_data.positions[mppc_cut_times == t],
-                    layers=mppc_data.layers[mppc_cut_times == t],
-                    tracks=mppc_data.tracks[mppc_cut_times == t],
-                    times=mppc_data.times[mppc_cut_times == t],
-                )
-
-                if not pixel_t.has_sufficient_data() or not mppc_t.has_sufficient_data():
-                    continue
-                combined_tracks = torch.cat([pixel_t.tracks, mppc_t.tracks], dim=0)
-                if torch.unique(combined_tracks).numel() >= min_tracks:
-                    viable.append(idx)
-                    break
-        return viable
-
-    def _create_edges(
-        self, src_data: DetectorData, dst_data: DetectorData, config: EdgeConfig
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _create_edges(self, src_data: DetectorData, dst_data: DetectorData, 
+                     config: EdgeConfig) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Create edges between source and destination nodes."""
         if len(src_data) == 0 or len(dst_data) == 0:
             return None, None
 
-        row, col = all_indices_hetero(
-            len(src_data), len(dst_data), include_self=False, same_type=config.same_type
-        )
+        row, col = generate_all_pairs(len(src_data), len(dst_data), 
+                                     include_self=False, same_type=config.same_type)
 
         if row.numel() == 0:
             return None, None
@@ -227,8 +199,8 @@ class HeteroGraphBuilder(GraphBuilderBase):
         if self.connect_layers and config.use_layers:
             layer_diff = (src_data.layers[row] - dst_data.layers[col]).abs()
             layer_mask = (layer_diff <= 1) & ~(
-                ((src_data.layers[row] == 2) & (dst_data.layers[col] == 3))
-                | ((src_data.layers[row] == 3) & (dst_data.layers[col] == 2))
+                ((src_data.layers[row] == 2) & (dst_data.layers[col] == 3)) |
+                ((src_data.layers[row] == 3) & (dst_data.layers[col] == 2))
             )
             row, col = row[layer_mask], col[layer_mask]
 
@@ -241,31 +213,11 @@ class HeteroGraphBuilder(GraphBuilderBase):
         if row.numel() == 0:
             return None, None
 
-        # Create edge labels
-        edge_labels = (
-            (src_data.tracks[row] > 0) & (src_data.tracks[row] == dst_data.tracks[col])
-        ).float()
-
+        edge_labels = self._create_edge_labels(src_data.tracks, dst_data.tracks, row, col)
         return torch.stack([row, col], dim=0), edge_labels
 
-    def _add_edges_to_graph(
-        self,
-        graph: HeteroData,
-        config: EdgeConfig,
-        edge_index: Optional[torch.Tensor],
-        edge_labels: Optional[torch.Tensor],
-    ):
-        """Add edges to graph if they exist."""
-        if edge_index is not None and edge_labels is not None:
-            graph[config.edge_type].edge_index = edge_index
-            graph[config.edge_type].edge_labels = edge_labels
-
-    def _create_hetero_graph(
-        self,
-        pixel_data: DetectorData,
-        mppc_data: DetectorData,
-        time_slice: torch.Tensor,
-    ) -> Optional[HeteroData]:
+    def _create_hetero_graph(self, pixel_data: DetectorData, mppc_data: DetectorData,
+                           time_slice: torch.Tensor) -> Optional[HeteroData]:
         """Create heterogeneous graph for a specific time slice."""
         # Filter data for current time slice
         pixel_t = pixel_data.filter_by_time(time_slice)
@@ -284,26 +236,27 @@ class HeteroGraphBuilder(GraphBuilderBase):
         # Create graph with node features
         graph = HeteroData()
         graph["pixel"].x = pixel_t.positions
-        graph["mppc"].x = torch.cat(
-            [mppc_t.positions, mppc_t.times.unsqueeze(1)], dim=1
-        )
+        graph["mppc"].x = torch.cat([mppc_t.positions, mppc_t.times.unsqueeze(1)], dim=1)
 
         # Create edges for all configured types
         data_map = {"pixel": pixel_t, "mppc": mppc_t}
+        edges_created = 0
 
         for config in self.edge_configs:
             src_data = data_map[config.src_type]
             dst_data = data_map[config.dst_type]
 
             edge_index, edge_labels = self._create_edges(src_data, dst_data, config)
-            self._add_edges_to_graph(graph, config, edge_index, edge_labels)
+            
+            if edge_index is not None and edge_labels is not None:
+                graph[config.edge_type].edge_index = edge_index
+                graph[config.edge_type].edge_labels = edge_labels
+                edges_created += 1
 
-        return graph if len(graph.edge_types) == 4 else None
+        return graph if edges_created == 4 else None
 
-
-    def build_graphs_from_event(
-        self, mppc: Union[torch.Tensor, any], pixel: Union[torch.Tensor, any]
-    ) -> List[HeteroData]:
+    def build_graphs_from_event(self, pixel: Union[torch.Tensor, any], 
+                              mppc: Union[torch.Tensor, any], **kwargs) -> List[HeteroData]:
         """Build heterogeneous graphs from a single event."""
         mppc = self._validate_tensor(mppc, "mppc")
         pixel = self._validate_tensor(pixel, "pixel")
@@ -321,7 +274,8 @@ class HeteroGraphBuilder(GraphBuilderBase):
 
 
 class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
-    """Builder for layer-separated heterogeneous graphs with specific connectivity pattern:
+    """
+    Builder for layer-separated heterogeneous graphs with specific connectivity:
     layer_1 <-> layer_2 <-> mppc <-> mppc <-> layer_3 <-> layer_4
     """
 
@@ -357,7 +311,7 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         
         for layer_id in [1, 2, 3, 4]:
             layer_mask = pixel_data.layers == layer_id
-            if layer_mask.sum() > 0:  # Only create if we have data for this layer
+            if layer_mask.sum() > 0:
                 layer_data[f"layer_{layer_id}"] = DetectorData(
                     positions=pixel_data.positions[layer_mask],
                     layers=pixel_data.layers[layer_mask],
@@ -379,9 +333,8 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         
         return layer_data
 
-    def _create_edges(
-        self, src_data: DetectorData, dst_data: DetectorData, config: EdgeConfig
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _create_edges(self, src_data: DetectorData, dst_data: DetectorData, 
+                     config: EdgeConfig) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Create edges between source and destination nodes."""
         if len(src_data) == 0 or len(dst_data) == 0:
             return None, None
@@ -394,7 +347,6 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
             # For same type connections (mppc-mppc), create all pairs excluding self-connections
             row = src_indices.repeat_interleave(len(dst_data))
             col = dst_indices.repeat(len(src_data))
-            # Remove self connections
             mask = row != col
             row, col = row[mask], col[mask]
         else:
@@ -414,31 +366,11 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         if row.numel() == 0:
             return None, None
 
-        # Create edge labels (1.0 if both nodes belong to same positive track)
-        edge_labels = (
-            (src_data.tracks[row] > 0) & (src_data.tracks[row] == dst_data.tracks[col])
-        ).float()
-
+        edge_labels = self._create_edge_labels(src_data.tracks, dst_data.tracks, row, col)
         return torch.stack([row, col], dim=0), edge_labels
 
-    def _add_edges_to_graph(
-        self,
-        graph: HeteroData,
-        config: EdgeConfig,
-        edge_index: Optional[torch.Tensor],
-        edge_labels: Optional[torch.Tensor],
-    ):
-        """Add edges to graph if they exist."""
-        if edge_index is not None and edge_labels is not None:
-            graph[config.edge_type].edge_index = edge_index
-            graph[config.edge_type].edge_labels = edge_labels
-
-    def _create_layer_separated_graph(
-        self,
-        pixel_data: DetectorData,
-        mppc_data: DetectorData,
-        time_slice: torch.Tensor,
-    ) -> Optional[HeteroData]:
+    def _create_layer_separated_graph(self, pixel_data: DetectorData, mppc_data: DetectorData,
+                                    time_slice: torch.Tensor) -> Optional[HeteroData]:
         """Create layer-separated heterogeneous graph for a specific time slice."""
         # Filter pixel data for current time slice
         pixel_t = pixel_data.filter_by_time(time_slice)
@@ -455,15 +387,8 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         # Separate pixel data into layers
         layer_data = self._separate_pixel_layers(pixel_t)
         
-        # Check if we have sufficient data - need at least some nodes in connected layers
-        has_layer_1 = len(layer_data["layer_1"]) > 0
-        has_layer_2 = len(layer_data["layer_2"]) > 0
-        has_layer_3 = len(layer_data["layer_3"]) > 0
-        has_layer_4 = len(layer_data["layer_4"]) > 0
-        has_mppc = len(mppc_t) > 0
-        
-        # Need at least a connected path through the graph
-        if not (has_layer_2 and has_mppc and has_layer_3):
+        # Check if we have sufficient data - need connected path through the graph
+        if not (len(layer_data["layer_2"]) > 0 and len(mppc_t) > 0 and len(layer_data["layer_3"]) > 0):
             return None
 
         # Create graph with node features
@@ -489,15 +414,14 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
 
             edge_index, edge_labels = self._create_edges(src_data, dst_data, config)
             if edge_index is not None:
-                self._add_edges_to_graph(graph, config, edge_index, edge_labels)
+                graph[config.edge_type].edge_index = edge_index
+                graph[config.edge_type].edge_labels = edge_labels
                 edges_added += 1
 
-        # Only return graph if we have meaningful connectivity
         return graph if edges_added > 0 else None
 
-    def build_graphs_from_event(
-        self, mppc: Union[torch.Tensor, any], pixel: Union[torch.Tensor, any]
-    ) -> List[HeteroData]:
+    def build_graphs_from_event(self, pixel: Union[torch.Tensor, any], 
+                              mppc: Union[torch.Tensor, any], **kwargs) -> List[HeteroData]:
         """Build layer-separated heterogeneous graphs from a single event."""
         mppc = self._validate_tensor(mppc, "mppc")
         pixel = self._validate_tensor(pixel, "pixel")
@@ -521,21 +445,6 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         """Return list of edge types in this graph."""
         return [config.edge_type for config in self.edge_configs]
 
-    def print_connectivity_pattern(self):
-        """Print the connectivity pattern of this graph builder."""
-        print("Layer-Separated Heterogeneous Graph Connectivity:")
-        print("layer_1 <-> layer_2 <-> mppc <-> mppc <-> layer_3 <-> layer_4")
-        print("\nNode types:", self.get_node_types())
-        print("\nEdge types:")
-        for edge_type in self.get_edge_types():
-            print(f"  {edge_type}")
-
-    def get_viable_event_indices(self, **kwargs):
-        """Get indices of events that can produce at least one valid graph."""
-        return super().get_viable_event_indices(**kwargs)
-    
-
-    
 
 class CombinedGraphBuilder(GraphBuilderBase):
     """Builder for combined homogeneous graphs with both detector types."""
@@ -544,37 +453,30 @@ class CombinedGraphBuilder(GraphBuilderBase):
         super().__init__(connect_layers)
         self.mppc_timing_cutoff = mppc_timing_cutoff
 
-    def _create_combined_edges(
-        self, combined_data: DetectorData, num_pixel: int
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _create_combined_edges(self, combined_data: DetectorData, 
+                             num_pixel: int) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Create edges for combined pixel+MPPC nodes."""
         if len(combined_data) < 2:
             return None, None
 
-        row, col = all_indices_hetero(
-            len(combined_data), len(combined_data), include_self=False, same_type=True
-        )
+        row, col = generate_all_pairs(len(combined_data), len(combined_data), 
+                                     include_self=False, same_type=True)
 
         if self.connect_layers and row.numel() > 0:
             # Complex layer logic from original code
-            layer_diff_mask = (
-                combined_data.layers[row] - combined_data.layers[col]
-            ).abs() <= 1
+            layer_diff_mask = (combined_data.layers[row] - combined_data.layers[col]).abs() <= 1
 
             # Exclude connections between layers 2 and 3
             layer_23_mask = ~(
-                ((combined_data.layers[row] == 2) & (combined_data.layers[col] == 3))
-                | ((combined_data.layers[row] == 3) & (combined_data.layers[col] == 2))
+                ((combined_data.layers[row] == 2) & (combined_data.layers[col] == 3)) |
+                ((combined_data.layers[row] == 3) & (combined_data.layers[col] == 2))
             )
 
             # Exclude MPPC-MPPC connections with large time differences
             mppc_timing_mask = ~(
-                (combined_data.layers[row] == 2.5)
-                & (combined_data.layers[col] == 2.5)
-                & (
-                    torch.abs(combined_data.times[row] - combined_data.times[col])
-                    > self.mppc_timing_cutoff
-                )
+                (combined_data.layers[row] == 2.5) & 
+                (combined_data.layers[col] == 2.5) & 
+                (torch.abs(combined_data.times[row] - combined_data.times[col]) > self.mppc_timing_cutoff)
             )
 
             edge_mask = layer_diff_mask & layer_23_mask & mppc_timing_mask
@@ -583,17 +485,13 @@ class CombinedGraphBuilder(GraphBuilderBase):
         if row.numel() == 0:
             return None, None
 
-        edge_labels = (
-            (combined_data.tracks[row] > 0)
-            & (combined_data.tracks[row] == combined_data.tracks[col])
-        ).float()
+        edge_labels = self._create_edge_labels(combined_data.tracks, combined_data.tracks, row, col)
         edge_index = torch.stack([row, col], dim=0)
 
         return edge_index, edge_labels
 
-    def build_graphs_from_event(
-        self, mppc: Union[torch.Tensor, any], pixel: Union[torch.Tensor, any]
-    ) -> List[Data]:
+    def build_graphs_from_event(self, pixel: Union[torch.Tensor, any], 
+                              mppc: Union[torch.Tensor, any], **kwargs) -> List[Data]:
         """Build combined homogeneous graphs from event data."""
         mppc = self._validate_tensor(mppc, "mppc")
         pixel = self._validate_tensor(pixel, "pixel")
@@ -612,29 +510,17 @@ class CombinedGraphBuilder(GraphBuilderBase):
                 continue
 
             # Create combined node features
-            pixel_nodes = torch.cat(
-                [
-                    pixel_t.positions,
-                    torch.full(
-                        (len(pixel_t), 1), 1, device=pixel_t.positions.device
-                    ),  # Type flag
-                    torch.full(
-                        (len(pixel_t), 1), time_slice, device=pixel_t.positions.device
-                    ),
-                ],
-                dim=1,
-            )
+            pixel_nodes = torch.cat([
+                pixel_t.positions,
+                torch.full((len(pixel_t), 1), 1, device=pixel_t.positions.device),  # Type flag
+                torch.full((len(pixel_t), 1), time_slice, device=pixel_t.positions.device),
+            ], dim=1)
 
-            mppc_nodes = torch.cat(
-                [
-                    mppc_data.positions[mppc_mask],
-                    torch.full(
-                        (mppc_mask.sum(), 1), 0, device=mppc_data.positions.device
-                    ),  # Type flag
-                    mppc_data.times[mppc_mask].unsqueeze(1),
-                ],
-                dim=1,
-            )
+            mppc_nodes = torch.cat([
+                mppc_data.positions[mppc_mask],
+                torch.full((mppc_mask.sum(), 1), 0, device=mppc_data.positions.device),  # Type flag
+                mppc_data.times[mppc_mask].unsqueeze(1),
+            ], dim=1)
 
             # Combine all data
             combined_nodes = torch.cat([pixel_nodes, mppc_nodes], dim=0)
@@ -645,392 +531,14 @@ class CombinedGraphBuilder(GraphBuilderBase):
                 times=torch.cat([pixel_t.times, mppc_data.times[mppc_mask]], dim=0),
             )
 
-            edge_index, edge_labels = self._create_combined_edges(
-                combined_data, len(pixel_t)
-            )
+            edge_index, edge_labels = self._create_combined_edges(combined_data, len(pixel_t))
 
             if edge_index is not None:
                 graph = Data(
-                    x=combined_nodes, edge_index=edge_index, edge_labels=edge_labels
+                    x=combined_nodes,
+                    edge_index=edge_index, 
+                    edge_labels=edge_labels
                 )
                 graphs.append(graph)
 
         return graphs
-    
-    def get_viable_event_indices(self, X_mppc, X_pixel, min_tracks: int = 2) -> List[int]:
-        """Get indices of events that can produce at least one valid graph."""
-        viable = []
-        for idx in range(X_pixel.size(0)):
-            pixel_event = X_pixel[idx]
-            mppc_event = X_mppc[idx]
-            pixel_data = self._extract_detector_data(
-                self._validate_tensor(pixel_event, "pixel_event")
-            )
-            mppc_data = self._extract_detector_data(
-                self._validate_tensor(mppc_event, "mppc_event")
-            )
-            if len(pixel_data) < 2 or len(mppc_data) < 2:
-                continue
-            mppc_cut_times = (mppc_data.times // 8) * 8
-            for t in torch.unique(pixel_data.times):
-                pixel_t = pixel_data.filter_by_time(t)
-                mppc_t = DetectorData(
-                    positions=mppc_data.positions[mppc_cut_times == t],
-                    layers=mppc_data.layers[mppc_cut_times == t],
-                    tracks=mppc_data.tracks[mppc_cut_times == t],
-                    times=mppc_data.times[mppc_cut_times == t],
-                )
-                if not pixel_t.has_sufficient_data() or not mppc_t.has_sufficient_data():
-                    continue
-                combined_tracks = torch.cat([pixel_t.tracks, mppc_t.tracks], dim=0)
-                if torch.unique(combined_tracks).numel() >= min_tracks:
-                    viable.append(idx)
-                    break
-        return viable
-        
-
-
-class EventProcessor:
-    """Main processor for converting events to graphs."""
-
-    def __init__(self, graph_builder: GraphBuilderBase):
-        self.graph_builder = graph_builder
-
-    def process_single_event(self, **kwargs) -> List[Union[Data, HeteroData]]:
-        """Process single event to graphs."""
-        if isinstance(self.graph_builder, PixelGraphBuilder):
-            if "X_pixel" not in kwargs:
-                raise ValueError("X_pixel is required for PixelGraphBuilder")
-            return self.graph_builder.build_graphs_from_event(kwargs["X_pixel"])
-        elif isinstance(self.graph_builder, HeteroGraphBuilder):
-            if "X_pixel" not in kwargs or "X_mppc" not in kwargs:
-                raise ValueError(
-                    "X_pixel and X_mppc are required for HeteroGraphBuilder"
-                )
-            return self.graph_builder.build_graphs_from_event(
-                kwargs["X_mppc"], kwargs["X_pixel"]
-            )
-        elif isinstance(self.graph_builder, CombinedGraphBuilder):
-            if "X_pixel" not in kwargs or "X_mppc" not in kwargs:
-                raise ValueError(
-                    "X_pixel and X_mppc are required for CombinedGraphBuilder"
-                )
-            return self.graph_builder.build_graphs_from_event(
-                kwargs["X_mppc"], kwargs["X_pixel"]
-            )
-        elif isinstance(self.graph_builder, LayerSeparatedHeteroGraphBuilder):
-            if "X_pixel" not in kwargs or "X_mppc" not in kwargs:
-                raise ValueError(
-                    "X_pixel and X_mppc are required for LayerSeparatedHeteroGraphBuilder"
-                )
-            return self.graph_builder.build_graphs_from_event(
-                kwargs["X_mppc"], kwargs["X_pixel"]
-            )
-        else:
-            raise ValueError("Unsupported graph builder type")
-
-    def _validate_input_tensors(self, **kwargs) -> Tuple[dict, Optional[torch.Tensor]]:
-        """Validate and prepare input tensors."""
-        input_tensors = {}
-        labels = None
-
-        for key, value in kwargs.items():
-            if key == "labels":
-                labels = (
-                    value
-                    if isinstance(value, torch.Tensor)
-                    else torch.tensor(value, dtype=torch.float32)
-                )
-            else:
-                tensor = (
-                    value
-                    if isinstance(value, torch.Tensor)
-                    else torch.tensor(value, dtype=torch.float32)
-                )
-                if tensor.dim() == 3:
-                    tensor = tensor.squeeze(0)
-                elif tensor.dim() != 2:
-                    raise ValueError(f"{key} must be 2D or 3D tensor")
-                input_tensors[key] = tensor
-
-        return input_tensors, labels
-
-    def process_graphs(self, **kwargs) -> List[Union[Data, HeteroData]]:
-        """Process batch of events to list of graphs with labels."""
-        input_tensors, labels = self._validate_input_tensors(**kwargs)
-
-        all_graphs = []
-        event_indices = []
-        valid_labels = []
-
-        num_events = next(iter(input_tensors.values())).size(0)
-
-        for event_idx in range(num_events):
-            event_data = {
-                key: tensor[event_idx] for key, tensor in input_tensors.items()
-            }
-            graphs = self.process_single_event(**event_data)
-
-            if graphs:
-                all_graphs.extend(graphs)
-                event_indices.extend([event_idx] * len(graphs))
-                if labels is not None:
-                    for graph in graphs:
-                        graph.y = labels[event_idx]
-                    valid_labels.append(labels[event_idx])
-
-        return (
-            all_graphs,
-            torch.tensor(event_indices, dtype=torch.long),
-            torch.stack(valid_labels) if valid_labels else None,
-        )
-
-    def process_to_graphs(self, **kwargs) -> List[Union[Data, HeteroData]]:
-        """Process batch of events to list of graphs."""
-        all_graphs, _, _ = self.process_graphs(**kwargs)
-        return all_graphs
-
-    def process_to_graph_set(self, **kwargs) -> Optional[Batch]:
-        """Process batch of events to PyTorch Geometric batch."""
-        all_graphs, event_indices, valid_labels = self.process_graphs(**kwargs)
-
-        if not all_graphs:
-            return None
-
-        batch = Batch.from_data_list(all_graphs)
-        batch.event_idx = event_indices
-        batch.y = valid_labels if valid_labels is not None else None
-
-        return batch
-    
-    def get_viable_event_indices(
-        self, pixel: torch.Tensor, mppc: torch.Tensor, min_tracks: int = 2
-    ) -> List[int]:
-        """Get indices of events that can produce at least one valid graph."""
-        if hasattr(self.graph_builder, "get_viable_event_indices"):
-            return self.graph_builder.get_viable_event_indices(
-                pixel=pixel, mppc=mppc, min_tracks=min_tracks
-            )
-        else:
-            raise NotImplementedError(
-                "get_viable_event_indices is not implemented for this graph builder"
-            )
-
-class EventFilter:
-    """Utility for filtering viable events."""
-
-    @staticmethod
-    def get_viable_events(
-        events: torch.Tensor,
-        track_ids: torch.Tensor,
-        layers: Optional[torch.Tensor] = None,
-        min_tracks: int = 2,
-    ) -> List[int]:
-        """Return indices of events that produce at least one valid graph."""
-        viable = []
-
-        for idx in range(events.size(0)):
-            event = events[idx]
-            tracks = track_ids[idx] if track_ids.dim() > 1 else track_ids
-
-            mask = event[:, -1] != -1
-            if mask.sum() < 2:
-                continue
-
-            hits = event[mask]
-            tracks_valid = tracks[mask]
-            times = hits[:, -1]
-
-            for t in torch.unique(times):
-                tm = times == t
-                tracks_t = tracks_valid[tm]
-
-                if tm.sum() >= 2 and torch.unique(tracks_t).numel() >= min_tracks:
-                    viable.append(idx)
-                    break
-
-        return viable
-
-
-class GraphDataset(Dataset):
-    """Enhanced dataset for graph processing with caching support."""
-
-    def __init__(
-        self,
-        events: torch.Tensor,
-        labels: torch.Tensor,
-        track_ids: torch.Tensor,
-        processor: EventProcessor,
-        layer_ids: Optional[torch.Tensor] = None,
-        cache_graphs: bool = False,
-    ):
-        super().__init__()
-
-        # Validate and convert inputs
-        self.events = (
-            events
-            if isinstance(events, torch.Tensor)
-            else torch.tensor(events, dtype=torch.float32)
-        )
-        self.labels = (
-            labels
-            if isinstance(labels, torch.Tensor)
-            else torch.tensor(labels, dtype=torch.float32)
-        )
-        self.track_ids = (
-            track_ids
-            if isinstance(track_ids, torch.Tensor)
-            else torch.tensor(track_ids, dtype=torch.long)
-        )
-        self.layer_ids = (
-            layer_ids
-            if layer_ids is None or isinstance(layer_ids, torch.Tensor)
-            else torch.tensor(layer_ids, dtype=torch.long)
-        )
-
-        self.processor = processor
-        self.cache_graphs = cache_graphs
-
-        # Filter to viable events only
-        self.valid_indices = EventFilter.get_viable_events(
-            self.events, self.track_ids, self.layer_ids
-        )
-
-        # Cache graphs if requested
-        if self.cache_graphs:
-            self._cache_all_graphs()
-
-    def _cache_all_graphs(self):
-        """Pre-compute and cache all graphs."""
-        self.cached_graphs = {}
-        for idx in self.valid_indices:
-            graphs = self.processor.process_single_event(self.events[idx])
-            self.cached_graphs[idx] = graphs
-
-    def __len__(self) -> int:
-        return len(self.valid_indices)
-
-    def __getitem__(
-        self, idx: int
-    ) -> Tuple[List[Union[Data, HeteroData]], torch.Tensor]:
-        actual_idx = self.valid_indices[idx]
-
-        if self.cache_graphs:
-            graphs = self.cached_graphs[actual_idx]
-        else:
-            graphs = self.processor.process_single_event(self.events[actual_idx])
-
-        return graphs, self.labels[actual_idx]
-
-
-class GraphDataLoader:
-    """Enhanced data loader for batching graphs."""
-
-    def __init__(
-        self, dataset: GraphDataset, batch_size: int = 32, shuffle: bool = True
-    ):
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-
-    def __iter__(self):
-        indices = torch.arange(len(self.dataset))
-        if self.shuffle:
-            indices = indices[torch.randperm(len(indices))]
-
-        for start in range(0, len(self.dataset), self.batch_size):
-            batch_indices = indices[start : start + self.batch_size]
-            batch_graphs = []
-            event_indices = []
-            labels = []
-
-            for event_idx, dataset_idx in enumerate(batch_indices):
-                graphs, label = self.dataset[dataset_idx.item()]
-
-                # Attach labels to individual graphs
-                for graph in graphs:
-                    graph.y = label
-
-                batch_graphs.extend(graphs)
-                event_indices.extend([event_idx] * len(graphs))
-                labels.append(label)
-
-            if batch_graphs:  # Only yield if we have graphs
-                batch = Batch.from_data_list(batch_graphs)
-                batch.event_idx = torch.tensor(event_indices, dtype=torch.long)
-                batch.y = torch.tensor(labels, dtype=torch.float32)
-                yield batch
-
-    def __len__(self) -> int:
-        return (len(self.dataset) + self.batch_size - 1) // self.batch_size
-
-
-# Legacy function wrappers for backward compatibility
-def pixel_hits_to_graphs(event, connect_layers=True):
-    """Legacy wrapper - use PixelGraphBuilder instead."""
-    builder = PixelGraphBuilder(connect_layers)
-    return builder.build_graphs_from_event(event)
-
-
-def full_event_to_hetero_graphs(
-    mppc, pixel, connect_layers=True, mppc_timing_cutoff=0.2
-):
-    """Legacy wrapper - use HeteroGraphBuilder instead."""
-    builder = HeteroGraphBuilder(connect_layers, mppc_timing_cutoff)
-    return builder.build_graphs_from_event(mppc, pixel)
-
-
-def full_event_to_graphs(mppc, pixel, connect_layers=True, mppc_timing_cutoff=0.1):
-    """Legacy wrapper - use CombinedGraphBuilder instead."""
-    builder = CombinedGraphBuilder(connect_layers, mppc_timing_cutoff)
-    return builder.build_graphs_from_event(mppc, pixel)
-
-
-def batch_pixel_hits_to_graph_sets(pixel, labels, connect_layers=True):
-    """Legacy wrapper for pixel batch processing."""
-    builder = PixelGraphBuilder(connect_layers)
-    processor = EventProcessor(builder)
-
-    events_data = [pixel[i] for i in range(pixel.size(0))]
-    batch = processor.process_batch_to_batch(events_data, labels)
-    return batch
-
-
-def batch_full_events_to_hetero_graph_set(
-    mppc, pixel, labels, connect_layers=True, mppc_timing_cutoff=0.1
-):
-    """Legacy wrapper for hetero batch processing."""
-    builder = HeteroGraphBuilder(connect_layers, mppc_timing_cutoff)
-    processor = EventProcessor(builder)
-
-    events_data = [(mppc[i], pixel[i]) for i in range(mppc.size(0))]
-    batch = processor.process_batch_to_batch(events_data, labels)
-    return batch
-
-
-def get_viable_events(events, track_ids, layers=None):
-    """Legacy wrapper - use EventFilter.get_viable_events() instead."""
-    return EventFilter.get_viable_events(events, track_ids, layers)
-
-
-# Factory functions for easy instantiation
-def create_pixel_processor(connect_layers: bool = True) -> EventProcessor:
-    """Create processor for pixel-only graphs."""
-    builder = PixelGraphBuilder(connect_layers)
-    return EventProcessor(builder)
-
-
-def create_hetero_processor(
-    connect_layers: bool = True, mppc_timing_cutoff: float = 0.2
-) -> EventProcessor:
-    """Create processor for heterogeneous graphs."""
-    builder = HeteroGraphBuilder(connect_layers, mppc_timing_cutoff)
-    return EventProcessor(builder)
-
-
-def create_combined_processor(
-    connect_layers: bool = True, mppc_timing_cutoff: float = 0.1
-) -> EventProcessor:
-    """Create processor for combined homogeneous graphs."""
-    builder = CombinedGraphBuilder(connect_layers, mppc_timing_cutoff)
-    return EventProcessor(builder)

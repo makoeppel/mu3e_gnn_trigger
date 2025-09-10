@@ -4,9 +4,9 @@ universe = vanilla
 # $(script) will be substituted when you queue
 arguments = "python3 $(script)"
 
-error  = /afs/desy.de/user/a/aulich/mu3e_trigger/CONDOR/logs/$(ClusterId).$(ProcId).err
-log    = /afs/desy.de/user/a/aulich/mu3e_trigger/CONDOR/logs/$(ClusterId).$(ProcId).log
-output = /afs/desy.de/user/a/aulich/mu3e_trigger/CONDOR/logs/$(ClusterId).$(ProcId).out
+error  = /afs/desy.de/user/a/aulich/mu3e_trigger/CONDOR/logs/$(script).$(ProcId).err
+log    = /afs/desy.de/user/a/aulich/mu3e_trigger/CONDOR/logs/$(script).$(ProcId).log
+output = /afs/desy.de/user/a/aulich/mu3e_trigger/CONDOR/logs/$(script).$(ProcId).out
 
 RequestCPUs    = 8
 RequestGPUs    = 1

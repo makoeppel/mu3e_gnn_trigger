@@ -70,6 +70,36 @@ def adjust_mppc_timestamps(
     adjusted_timestamps = flat_converted_timestamps.reshape(shape)
     return adjusted_timestamps
 
+def get_track_truth(mc_track_id, mc_track_px, mc_track_py, mc_track_pz, mc_track_e, mc_track_pdg_id, padding_value=-1):
+    """
+    Get track truth information for each hit based on mc_track_id.
+    Returns a numpy array of shape (N, seq_length, 5) where the last dimension contains
+    [px, py, pz, e, pdg_id] for each hit. If mc_track_id is padding_value, the corresponding
+    truth information is also set to padding_value.
+    """
+    n_events, seq_length = mc_track_id.shape
+    truth_info = np.full((n_events, seq_length, 5), padding_value, dtype=np.float32)
+
+    flat_mc_track_id = mc_track_id.flatten()
+    flat_truth_info = truth_info.reshape(-1, 5)
+    flat_mask = flat_mc_track_id != padding_value
+
+    valid_mc_track_ids = flat_mc_track_id[flat_mask]
+
+    # Ensure mc_track_id values are within the valid range
+    if valid_mc_track_ids.size > 0:
+        max_id = max(np.max(valid_mc_track_ids), len(mc_track_px) - 1)
+        if np.any(valid_mc_track_ids < 0) or np.any(valid_mc_track_ids > max_id):
+            raise ValueError("mc_track_id contains invalid values.")
+
+        flat_truth_info[flat_mask, 0] = mc_track_px[valid_mc_track_ids]
+        flat_truth_info[flat_mask, 1] = mc_track_py[valid_mc_track_ids]
+        flat_truth_info[flat_mask, 2] = mc_track_pz[valid_mc_track_ids]
+        flat_truth_info[flat_mask, 3] = mc_track_e[valid_mc_track_ids]
+        flat_truth_info[flat_mask, 4] = mc_track_pdg_id[valid_mc_track_ids]
+
+    return truth_info
+
 
 def reorder_nla(nla: np.ndarray, padding_value: int = -1) -> np.ndarray:
     """
@@ -482,6 +512,11 @@ def convert_root_to_npy(
         if event_data.empty:
             raise ValueError("Event data is empty.")
         mc_track_id = file["mu3e_mchits"]["mc_track"].arrays(library="pd")["mc_track"]
+        mc_track_px = file["mu3e_mc_tracks"]["px"].arrays(library="pd")["px"]
+        mc_track_py = file["mu3e_mc_tracks"]["py"].arrays(library="pd")["py"]
+        mc_track_pz = file["mu3e_mc_tracks"]["pz"].arrays(library="pd")["pz"]
+        mc_track_e = file["mu3e_mc_tracks"]["e"].arrays(library="pd")["e"]
+        mc_track_pdg_id = file["mu3e_mc_tracks"]["pdg"].arrays(library="pd")["pdg"]
 
     # Convert pixel and MPPC data to numpy arrays
     (
@@ -526,6 +561,16 @@ def convert_root_to_npy(
     masked_pixel_hits = np.all(pixel_positions == padding_value, axis=-1)
     pixel_hit_timestamp[masked_pixel_hits] = padding_value
 
+    pixel_hit_track_truth = get_track_truth(
+        pixel_mc_hit_id,
+        mc_track_px,
+        mc_track_py,
+        mc_track_pz,
+        mc_track_e,
+        mc_track_pdg_id,
+        padding_value=padding_value,
+    )
+
     # Convert MPPC IDs to positions
     mppc_positions, mppc_track_ids = convert_mppc_to_location(
         mppc_id,
@@ -535,6 +580,18 @@ def convert_root_to_npy(
         mc_hit_id=mppc_mc_hit_id,
         track_id=mc_track_id,
         add_layer_as_feature=add_layer_as_feature,
+    )
+    masked_mppc_hits = np.all(mppc_positions == padding_value, axis=-1)
+    mppc_time[masked_mppc_hits] = padding_value
+
+    mppc_hit_track_truth = get_track_truth(
+        mppc_mc_hit_id,
+        mc_track_px,
+        mc_track_py,
+        mc_track_pz,
+        mc_track_e,
+        mc_track_pdg_id,
+        padding_value=padding_value,
     )
 
     # Make sure track IDs start from 0 for each event
@@ -547,28 +604,21 @@ def convert_root_to_npy(
     mppc_time = adjust_mppc_timestamps(mppc_time, padding_value)
 
     pixel_hit_spacetime = np.concatenate(
-        [pixel_positions, pixel_track_ids[:, :, None], pixel_hit_timestamp[:, :, None]],
+        [pixel_positions, pixel_hit_timestamp[:, :, None]],
         axis=-1,
     )
 
-    mppc_hit_spacetime = np.concatenate(
-        [mppc_positions, mppc_track_ids[:, :, None], mppc_time[:, :, None]], axis=-1
+    pixel_hit_track_labels = np.concatenate(
+        [pixel_track_ids[:, :, None], pixel_hit_track_truth], axis=-1
     )
-    if True:
-        # Sort pixel hits by timestamp
-        pixel_hit_spacetime = sort_by_feature(
-            pixel_hit_spacetime, pixel_hit_timestamp, padding_value=padding_value
-        )
-        mppc_hit_spacetime = sort_by_feature(
-            mppc_hit_spacetime, mppc_time, padding_value=padding_value
-        )
-        # Reorder to ensure non-padded entries are at the beginning
-        pixel_hit_spacetime = reorder_nla(
-            pixel_hit_spacetime, padding_value=padding_value
-        )
-        mppc_hit_spacetime = reorder_nla(
-            mppc_hit_spacetime, padding_value=padding_value
-        )
+
+    mppc_hit_spacetime = np.concatenate(
+        [mppc_positions, mppc_time[:, :, None]], axis=-1
+    )
+
+    mppc_hit_track_labels = np.concatenate(
+        [mppc_track_ids[:, :, None], mppc_hit_track_truth], axis=-1
+    )
 
     pixel_hit_number = (pixel_hit_spacetime != padding_value).any(axis=-1).sum(axis=-1)
     mppc_hit_number = (mppc_hit_spacetime != padding_value).any(axis=-1).sum(axis=-1)
@@ -579,6 +629,9 @@ def convert_root_to_npy(
     pixel_hit_spacetime = pixel_hit_spacetime[valid_mask]
     mppc_hit_spacetime = mppc_hit_spacetime[valid_mask]
 
+    pixel_hit_track_labels = pixel_hit_track_labels[valid_mask]
+    mppc_hit_track_labels = mppc_hit_track_labels[valid_mask]
+
     # Save spacetime data to files
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -587,13 +640,24 @@ def convert_root_to_npy(
         out_name += "_with_layer"
     pixel_file_path = f"{out_dir}{out_name}_pixel_spacetime.npy"
     mppc_file_path = f"{out_dir}{out_name}_mppc_spacetime.npy"
+    pixel_track_labels_file_path = f"{out_dir}{out_name}_pixel_track_labels.npy"
+    mppc_track_labels_file_path = f"{out_dir}{out_name}_mppc_track_labels.npy"
+    
     np.save(pixel_file_path, pixel_hit_spacetime)
     np.save(mppc_file_path, mppc_hit_spacetime)
+    np.save(pixel_track_labels_file_path, pixel_hit_track_labels)
+    np.save(mppc_track_labels_file_path, mppc_hit_track_labels)
     print(
         f"Saved pixel spacetime to {pixel_file_path} with shape {pixel_hit_spacetime.shape}"
     )
     print(
         f"Saved MPPC spacetime to {mppc_file_path} with shape {mppc_hit_spacetime.shape}"
+    )
+    print(
+        f"Saved pixel track labels to {pixel_track_labels_file_path} with shape {pixel_hit_track_labels.shape}"
+    )
+    print(
+        f"Saved MPPC track labels to {mppc_track_labels_file_path} with shape {mppc_hit_track_labels.shape}"
     )
 
 
@@ -637,91 +701,3 @@ def remap_track_ids(pixel_track_ids, mppc_track_ids):
     mppc_track_ids = flat_mppc_track_ids.reshape(mppc_track_ids.shape)
     pixel_track_ids = flat_pixel_track_ids.reshape(pixel_track_ids.shape)
     return pixel_track_ids, mppc_track_ids
-
-
-def get_rolled_up_sensor_hits(
-    pixel_hit_ids: np.ndarray,
-    padding_value: int = -1,
-):
-    """
-    Converts pixel hit IDs to a rolled-up sensor hit representation.
-    The whole detector is represented as a four 2D-images, where each image corresponds to a layer.
-    """
-    chip_ids = pixel_hit_ids // 2**16
-    layer_ids = ((chip_ids // 2**10) % 4) + 1
-    phi_ids = ((chip_ids // 2**5) % 2**5) + 1
-    z_prime = chip_ids % 2**5
-    z_ids = np.where(
-        layer_ids == 3, z_prime - 7, np.where(layer_ids == 4, z_prime - 6, z_prime)
-    )
-    station = chip_ids // 2**12
-    number_of_events = pixel_hit_ids.shape[0]
-    num_layers = 4
-
-    valid_mask = pixel_hit_ids != padding_value
-    valid_mask &= station == 0
-    layer_images = []
-    for layer in range(1, num_layers + 1):
-        layer_mask = layer_ids == layer
-        valid_layer_mask = valid_mask & layer_mask
-
-        layer_phi_min = phi_ids[valid_layer_mask].min()
-        layer_phi_max = phi_ids[valid_layer_mask].max()
-        layer_z_min = z_ids[valid_layer_mask].min()
-        layer_z_max = z_ids[valid_layer_mask].max()
-        layer_image = np.zeros(
-            (
-                number_of_events,
-                np.unique(phi_ids[valid_layer_mask]).size,
-                np.unique(z_ids[valid_layer_mask]).size,
-                1,
-            ),
-            dtype=np.int32,
-        )
-        for event in range(number_of_events):
-            for phi, z in zip(
-                phi_ids[event][valid_layer_mask[event]],
-                z_ids[event][valid_layer_mask[event]],
-            ):
-                if (
-                    phi < layer_phi_min
-                    or phi > layer_phi_max
-                    or z < layer_z_min
-                    or z > layer_z_max
-                ):
-                    raise ValueError(
-                        f"Invalid phi or z value for event {event}: phi={phi}, z={z}, "
-                        f"expected range: phi [{layer_phi_min}, {layer_phi_max}], z [{layer_z_min}, {layer_z_max}]"
-                    )
-                layer_image[event, phi - layer_phi_min, z - layer_z_min, 0] += 1
-
-        layer_images.append(layer_image)
-    return layer_images
-
-
-def get_image_slices_from_root(
-    file_path: str,
-    out_dir: str,
-    out_name: str,
-    padding_value: int = -1,
-    hit_cutoff: int = 128,
-):
-    with uproot.open(file_path) as file:
-        event_data = file["mu3e"].arrays(library="pd")
-        if event_data.empty:
-            raise ValueError("Event data is empty.")
-    pixel_hit_ids = load_ak_series_to_numpy(
-        event_data["hit_pixelid"], max_cols=hit_cutoff, fill_value=padding_value
-    )
-    if pixel_hit_ids.shape[0] == 0:
-        raise ValueError("No valid pixel hit IDs found.")
-    images = get_rolled_up_sensor_hits(pixel_hit_ids, padding_value=padding_value)
-    if not out_dir.endswith("/"):
-        out_dir += "/"
-    if not out_name:
-        raise ValueError("Output name must be provided.")
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    with open(f"{out_dir}{out_name}_images.pkl", "wb") as f:
-        pickle.dump(images, f)
