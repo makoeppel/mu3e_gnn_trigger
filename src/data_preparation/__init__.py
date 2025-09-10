@@ -1,1 +1,2 @@
-from .root_to_numpy import convert_root_to_npy
+from .root_to_numpy import convert_root_to_numpy
+from .load_training_data import load_numpy_files
