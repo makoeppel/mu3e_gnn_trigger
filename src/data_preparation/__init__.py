@@ -1,1 +1,1 @@
-from .root_to_numpy import convert_root_to_npy, get_image_slices_from_root
+from .root_to_numpy import convert_root_to_npy
