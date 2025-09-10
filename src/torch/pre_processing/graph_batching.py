@@ -285,6 +285,16 @@ class GraphBuilderBase(ABC):
         """Create graphs for a specific time slice."""
         pass
 
+    @abstractmethod
+    def get_edge_types(self) -> List[Tuple[str, str, str]]:
+        """Return list of edge types in the graph."""
+        pass
+
+    @abstractmethod
+    def get_node_dims(self) -> Dict[str, int]:
+        """Return dictionary of node feature dimensions per node type."""
+        pass
+
 
 class HeteroGraphBuilder(GraphBuilderBase):
     """Builder for heterogeneous graphs with pixel and MPPC node types."""
@@ -414,6 +424,29 @@ class HeteroGraphBuilder(GraphBuilderBase):
                 )
                 graphs.extend(time_graphs)
             return graphs
+
+    def get_edge_types(self) -> List[Tuple[str, str, str]]:
+        """Return list of edge types in the graph."""
+        return [config.edge_type for config in self.edge_configs]
+
+    def get_node_dims(self) -> Dict[str, int]:
+        """Return dictionary of node feature dimensions per node type."""
+        return {
+            "pixel": 3,  # x, y, z
+            "mppc": 4,  # x, y, z, time
+        }
+
+    def get_viable_event_indices(
+        self, pixel_events: List[EventData], mppc_events: List[EventData]
+    ) -> List[int]:
+        """Identify indices of events with sufficient data for graph construction."""
+        viable_indices = []
+        for idx, (pixel_event, mppc_event) in enumerate(zip(pixel_events, mppc_events)):
+            pixel_data = pixel_event.to_detector_data()
+            mppc_data = mppc_event.to_detector_data()
+            if pixel_data.has_sufficient_data() and mppc_data.has_sufficient_data():
+                viable_indices.append(idx)
+        return viable_indices
 
 
 class CombinedGraphBuilder(GraphBuilderBase):
@@ -613,7 +646,7 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
             ),
             EdgeConfig(
                 "layer_4", "layer_4", ("layer_4", "to", "layer_4"), True, False, False
-            )
+            ),
         ]
 
     def _separate_pixel_layers(
@@ -783,13 +816,41 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
                 graphs.extend(time_graphs)
             return graphs
 
-    def get_node_types(self) -> List[str]:
-        """Return list of node types in this graph."""
-        return ["layer_1", "layer_2", "layer_3", "layer_4", "mppc"]
+    def get_viable_event_indices(
+        self,
+        pixel_events: List[EventData],
+        mppc_events: List[EventData],
+        min_nodes: int = 2,
+    ) -> List[int]:
+        """Get indices of events that have sufficient data to form graphs."""
+        viable_indices = []
+        for idx, (pixel_event, mppc_event) in enumerate(zip(pixel_events, mppc_events)):
+            pixel_data = pixel_event.to_detector_data()
+            mppc_data = mppc_event.to_detector_data()
+            layer_data = self._separate_pixel_layers(pixel_data)
+
+            # Check if we have sufficient data - need connected path through the graph
+            if (
+                len(layer_data["layer_2"]) >= min_nodes
+                and len(mppc_data) >= min_nodes
+                and len(layer_data["layer_3"]) >= min_nodes
+            ):
+                viable_indices.append(idx)
+        return viable_indices
 
     def get_edge_types(self) -> List[Tuple[str, str, str]]:
-        """Return list of edge types in this graph."""
+        """Return list of edge types in the graph."""
         return [config.edge_type for config in self.edge_configs]
+
+    def get_node_dims(self) -> Dict[str, int]:
+        """Return dictionary of node feature dimensions per node type."""
+        return {
+            "layer_1": 3,  # x, y, z
+            "layer_2": 3,  # x, y, z
+            "mppc": 4,  # x, y, z, time
+            "layer_3": 3,  # x, y, z
+            "layer_4": 3,  # x, y, z
+        }
 
 
 class DetectorDataset(Dataset):
@@ -806,6 +867,7 @@ class DetectorDataset(Dataset):
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None,
+        cache_dir: Optional[str] = None,
     ):
 
         self.pixel_spacetime_path = pixel_spacetime_path
@@ -829,6 +891,22 @@ class DetectorDataset(Dataset):
         super().__init__(
             transform=transform, pre_transform=pre_transform, pre_filter=pre_filter
         )
+        if cache_dir is not None:
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_path = os.path.join(cache_dir, "detector_dataset_cache.pt")
+
+    def precompute(self, cache_path: str):
+        """Precompute and cache the dataset."""
+        data_list = []
+        for idx in range(len(self)):
+            graphs = self[idx]
+            if isinstance(graphs, list):
+                data_list.extend(graphs)
+            else:
+                data_list.append(graphs)
+
+        torch.save(data_list, cache_path)
+        print(f"Dataset cached at {cache_path}")
 
     def len(self) -> int:
         return len(self.pixel_events)
@@ -840,6 +918,18 @@ class DetectorDataset(Dataset):
         pixel_event = self.pixel_events[idx]
         mppc_event = self.mppc_events[idx]
         return self.graph_builder.build_graphs_from_event(pixel_event, mppc_event)
+
+    def get_node_dims(self) -> Optional[Dict[str, int]]:
+        """Get node feature dimensions if available."""
+        if hasattr(self.graph_builder, "get_node_dims"):
+            return self.graph_builder.get_node_dims()
+        return None
+
+    def get_edge_types(self) -> Optional[List[Tuple[str, str, str]]]:
+        """Get edge types if available."""
+        if hasattr(self.graph_builder, "get_edge_types"):
+            return self.graph_builder.get_edge_types()
+        return None
 
 
 class SequenceDataset(Dataset):

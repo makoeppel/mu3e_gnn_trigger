@@ -93,3 +93,34 @@ def get_class_weights(train_data, alpha = 2):
     positive_weight = weight_for_1 / weight_for_0 if weight_for_0 > 0 else 1.0
 
     return torch.tensor(positive_weight ** alpha, dtype=torch.float)
+
+
+class HeteroLossWrapper(nn.Module):
+    """
+    Wrapper to apply a given loss function to a specific edge type in a heterogeneous graph.
+    
+    Args:
+        base_loss (nn.Module): loss function to apply (e.g., nn.BCEWithLogitsLoss, FocalLoss)
+    """
+    def __init__(self, base_loss):
+        super().__init__()
+        self.base_loss = base_loss
+
+    def forward(self, prediction_dict, target_dict):
+        """
+        prediction_dict: dict of edge_type -> predictions
+        target_dict: dict of edge_type -> ground truth labels
+        """
+        total_loss = 0.0
+        count = 0
+        for edge_type in target_dict:
+            if edge_type in prediction_dict:
+                preds = prediction_dict[edge_type]
+                targets = target_dict[edge_type]
+                loss = self.base_loss(preds, targets)
+                total_loss += loss
+                count += 1
+        if count > 0:
+            return total_loss / count
+        else:
+            return torch.tensor(0.0, requires_grad=True)
