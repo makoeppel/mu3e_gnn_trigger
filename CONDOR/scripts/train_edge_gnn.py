@@ -21,7 +21,7 @@ from importlib import reload
 reload(graph_batching)
 
 train_dataset, test_dataset = graph_batching.create_dataset(
-    signal_prefix,
+    background_prefix,
     has_layer_feature=True,
     n_events=100000,
     split=(0.8, 0.2),
@@ -34,56 +34,96 @@ from torch_geometric.loader import DataLoader
 train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=512, shuffle=False)
 
+
+import torch
+from torch import nn
 from torch_geometric.data import HeteroData
+from torch_geometric.nn import HeteroConv, SAGEConv, BatchNorm
 from src.torch.model.components import get_mlp
-class EdgeClassifier(torch.nn.Module):
-    def __init__(self, node_dims, edge_types, num_layers, hidden_dim = 64, dropout = 0.0):
-        super(EdgeClassifier, self).__init__()
-        from torch_geometric.nn import HeteroConv, SAGEConv, Linear
-        self.dropout = dropout if dropout is not None else 0.0
-        if dropout < 0.0 or dropout >= 1.0:
-            raise ValueError("Dropout must be in the range [0.0, 1.0).")
 
-        self.input_embeddings = torch.nn.ModuleDict()
-        for node_type, node_dim in node_dims.items():
-            self.input_embeddings[node_type] = get_mlp(node_dim, hidden_dim, 2)
 
-        self.convs = torch.nn.ModuleList()
-        for i in range(num_layers):
+class EdgeClassifier(nn.Module):
+    def __init__(self, node_dims, edge_types, num_layers,
+                 hidden_dim=64, dropout=0.1):
+        super().__init__()
+
+        if not (0.0 <= dropout <= 1.0):
+            raise ValueError("Dropout must be in the range [0.0, 1.0].")
+
+        self.dropout = dropout
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        # Project all node features into a shared hidden_dim space
+        self.input_embeddings = nn.ModuleDict({
+            node_type: get_mlp(node_dim, hidden_dim, num_layers=2)
+            for node_type, node_dim in node_dims.items()
+        })
+
+        # Convolutional message passing layers with residuals + batchnorm
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        for _ in range(num_layers):
             conv = HeteroConv({
-                edge_type: SAGEConv((-1, -1), hidden_dim)
+                edge_type: SAGEConv((hidden_dim, hidden_dim), hidden_dim)
                 for edge_type in edge_types
-            }, aggr='mean')
+            }, aggr="mean")
             self.convs.append(conv)
-        self.edge_classifiers = torch.nn.ModuleDict()
-        for edge_type in edge_types:
-            self.edge_classifiers["_".join(edge_type)] = get_mlp(2 * hidden_dim, 1, 3)
-        self.lin = Linear(2 * hidden_dim, 1)
+
+            norm = nn.ModuleDict({
+                node_type: BatchNorm(hidden_dim)
+                for node_type in node_dims
+            })
+            self.norms.append(norm)
+
+        # Edge-specific classifiers (binary by default)
+        self.edge_classifiers = nn.ModuleDict({
+            "__".join(edge_type): get_mlp(2 * hidden_dim, 1, num_layers=3)
+            for edge_type in edge_types
+        })
 
     def forward(self, hetero_graph: HeteroData):
-        x_dict = hetero_graph.x_dict
-        edge_index_dict = hetero_graph.edge_index_dict
+        x_dict, edge_index_dict = hetero_graph.x_dict, hetero_graph.edge_index_dict
 
+        # Initial node embeddings
         for node_type, x in x_dict.items():
-            x_dict[node_type] = self.input_embeddings[node_type](x)
-            x_dict[node_type] = torch.relu(x_dict[node_type])
-            x_dict[node_type] = torch.nn.functional.dropout(x_dict[node_type], p=self.dropout, training=self.training)
+            x = self.input_embeddings[node_type](x)
+            x = torch.relu(x)
+            x = nn.functional.dropout(x, p=self.dropout, training=self.training)
+            x_dict[node_type] = x
 
-        for conv in self.convs:
-            x_dict = conv(x_dict, edge_index_dict)
-            x_dict = {key: x.relu() for key, x in x_dict.items()}
-            x_dict = {key: torch.nn.functional.dropout(x, p=self.dropout, training=self.training) for key, x in x_dict.items()}
+        # Convolutional message passing with residuals + norm + dropout
+        for i, (conv, norm) in enumerate(zip(self.convs, self.norms)):
+            new_x_dict = conv(x_dict, edge_index_dict)
 
+            updated_x_dict = {}
+            for node_type, x_new in new_x_dict.items():
+                x_old = x_dict[node_type]
+
+                # BatchNorm per node type
+                x_new = norm[node_type](x_new)
+
+                # Residual connection (only if dimensions match)
+                if x_new.shape == x_old.shape:
+                    x_new = x_new + x_old
+
+                # Dropout
+                x_new = nn.functional.dropout(x_new, p=self.dropout, training=self.training)
+
+                updated_x_dict[node_type] = x_new
+
+            x_dict = updated_x_dict
+
+        # Edge classification
         edge_preds = {}
         for edge_type, edge_index in edge_index_dict.items():
             src_type, _, dst_type = edge_type
-            src_x = x_dict[src_type]
-            dst_x = x_dict[dst_type]
-            edge_feat = torch.cat(
-                [src_x[edge_index[0]], dst_x[edge_index[1]]], dim=-1
-            )
-            edge_pred = self.edge_classifiers["_".join(edge_type)](edge_feat).view(-1)
+            src_x, dst_x = x_dict[src_type], x_dict[dst_type]
+
+            edge_feat = torch.cat([src_x[edge_index[0]], dst_x[edge_index[1]]], dim=-1)
+            edge_pred = self.edge_classifiers["__".join(edge_type)](edge_feat).view(-1)
             edge_preds[edge_type] = edge_pred
+
         return edge_preds
 
 edge_classifier = EdgeClassifier(
