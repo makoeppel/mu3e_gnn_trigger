@@ -29,76 +29,34 @@ COL_ID_SHIFT = 8
 BIT_MASK_8 = 2**8
 LAYER_SHIFT = 10
 LAYER_MASK = 4
+FRAME_LENGTH_8NS = 8
 
 
 class DataProcessingError(Exception):
     """Custom exception for data processing errors."""
-
     pass
 
 
-def convert_mppc_timestamp_to_ns(mppc_timestamp: np.ndarray) -> np.ndarray:
+def convert_mppc_timestamp_to_ns(mppc_timestamp: np.ndarray, padding_value = DEFAULT_PADDING_VALUE) -> np.ndarray:
     """Convert MPPC timestamp to nanoseconds."""
-    fine_part = mppc_timestamp % BIT_MASK_8
-    coarse_part = mppc_timestamp // BIT_MASK_8
-    return fine_part * 0.05 + coarse_part * 8
+    valid_mask = mppc_timestamp == padding_value
+    converted_mppc_timestamp = np.full_like(mppc_timestamp, padding_value, dtype=np.float32)
+    flat_converted_mppc_timestamp = converted_mppc_timestamp.flatten()
+    mppc_timestamp_flat = mppc_timestamp.flatten()
+    fine_part = mppc_timestamp_flat % BIT_MASK_8
+    coarse_part = mppc_timestamp_flat // BIT_MASK_8
+    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (coarse_part[~valid_mask.flatten()] % FRAME_LENGTH_8NS) * 8 + fine_part[~valid_mask.flatten()] * 0.05
+    return flat_converted_mppc_timestamp.reshape(mppc_timestamp.shape)
 
 
-def convert_pixel_timestamp_to_ns(pixel_timestamp: np.ndarray) -> np.ndarray:
+def convert_pixel_timestamp_to_ns(pixel_timestamp: np.ndarray, padding_value = DEFAULT_PADDING_VALUE) -> np.ndarray:
     """Convert pixel timestamp to nanoseconds."""
-    return pixel_timestamp * 8
-
-
-def adjust_timestamps(
-    timestamps: np.ndarray,
-    padding_value: int = DEFAULT_PADDING_VALUE,
-    timeframe_length: int = DEFAULT_TIMEFRAME_LENGTH,
-    is_mppc: bool = False,
-) -> np.ndarray:
-    """
-    Adjust timestamps based on data mask and timeframe normalization.
-
-    Args:
-        timestamps: Input timestamp array
-        padding_value: Value used for padding
-        timeframe_length: Length of timeframe for normalization
-        is_mppc: Whether these are MPPC timestamps (True) or pixel timestamps (False)
-
-    Returns:
-        Adjusted timestamp array
-    """
-    if timestamps.size == 0:
-        return timestamps
-
-    shape = timestamps.shape
-    flat_timestamps = timestamps.flatten()
-    valid_mask = flat_timestamps != padding_value
-
-    if not np.any(valid_mask):
-        return timestamps
-
-    # Convert timestamps
-    if is_mppc:
-        converted_timestamps = np.full_like(
-            flat_timestamps, padding_value, dtype=np.float64
-        )
-        converted_timestamps[valid_mask] = convert_mppc_timestamp_to_ns(
-            flat_timestamps[valid_mask]
-        )
-    else:
-        converted_timestamps = flat_timestamps.astype(np.float64)
-        converted_timestamps[valid_mask] = convert_pixel_timestamp_to_ns(
-            flat_timestamps[valid_mask]
-        )
-
-    # Apply timeframe normalization
-    converted_timestamps[valid_mask] = (
-        converted_timestamps[valid_mask]
-        - (converted_timestamps[valid_mask] // timeframe_length) * timeframe_length
-    )
-
-    return converted_timestamps.reshape(shape)
-
+    valid_mask = pixel_timestamp == padding_value
+    converted_pixel_timestamp = np.full_like(pixel_timestamp, padding_value, dtype=np.float32)
+    flat_converted_mppc_timestamp = converted_pixel_timestamp.flatten()
+    pixel_timestamp_flat = pixel_timestamp.flatten()
+    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (pixel_timestamp_flat[~valid_mask.flatten()] % FRAME_LENGTH_8NS) * 8
+    return flat_converted_mppc_timestamp.reshape(pixel_timestamp.shape)
 
 def validate_array_shapes(*arrays) -> None:
     """Validate that all arrays have the same shape."""
@@ -553,6 +511,7 @@ def convert_root_to_numpy(
     padding_value: float = DEFAULT_PADDING_VALUE,
     hit_cutoff: int = DEFAULT_HIT_CUTOFF,
     add_layer_feature: bool = False,
+    n_events: Optional[int] = None,
 ) -> None:
     """
     Convert ROOT file to NumPy arrays for machine learning.
@@ -588,7 +547,10 @@ def convert_root_to_numpy(
             sensor_positions = file["alignment/sensors"].arrays(library="pd")
             mppc_positions = file["alignment/mppcs"].arrays(library="pd")
             fibre_positions = file["alignment/fibres"].arrays(library="pd")
-            event_data = file["mu3e"].arrays(library="pd")
+            if n_events is not None:
+                event_data = file["mu3e"].arrays(library="pd", entry_stop=n_events)
+            else:
+                event_data = file["mu3e"].arrays(library="pd")
             mc_track_ids = file["mu3e_mchits"]["mc_track"].arrays(library="pd")[
                 "mc_track"
             ]
@@ -649,12 +611,9 @@ def convert_root_to_numpy(
             padding_value,
             add_layer_feature=add_layer_feature,
         )
-
-        # Adjust timestamps
-        pixel_timestamps = adjust_timestamps(
-            pixel_timestamps, padding_value, is_mppc=False
-        )
-        mppc_times = adjust_timestamps(mppc_times, padding_value, is_mppc=True)
+        # Convert timestamps to nanoseconds
+        pixel_timestamps = convert_pixel_timestamp_to_ns(pixel_timestamps, padding_value)
+        mppc_times = convert_mppc_timestamp_to_ns(mppc_times, padding_value)
 
         # Mask timestamps for invalid positions
         pixel_invalid_mask = np.all(pixel_locations == padding_value, axis=-1)

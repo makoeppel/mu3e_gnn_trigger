@@ -139,7 +139,12 @@ def generate_all_pairs(
 
 
 def load_npy_data(
-    spacetime_path: str, track_labels_path: str, has_layer_feature: bool = False
+    pixel_spacetime_path: str,
+    pixel_track_labels_path: str,
+    mppc_spacetime_path: str,
+    mppc_track_labels_path: str,
+    has_layer_feature: bool = False,
+    max_events: Optional[int] = None,
 ) -> List[EventData]:
     """
     Load data from .npy files and convert to EventData format.
@@ -152,41 +157,62 @@ def load_npy_data(
     Returns:
         List of EventData objects, one per event
     """
-    spacetime_data = np.load(spacetime_path)
-    track_labels_data = np.load(track_labels_path)
+    pixel_spacetime_data = np.load(pixel_spacetime_path)
+    pixel_track_labels_data = np.load(pixel_track_labels_path)
+    mppc_spacetime_data = np.load(mppc_spacetime_path)
+    mppc_track_labels_data = np.load(mppc_track_labels_path)
 
-    if spacetime_data.shape[:2] != track_labels_data.shape[:2]:
+    if len(pixel_spacetime_data) != len(mppc_spacetime_data):
+        raise ValueError("Mismatch in number of events between pixel and mppc data")
+    if len(pixel_track_labels_data) != len(mppc_track_labels_data):
+        raise ValueError("Mismatch in number of events between pixel and mppc data")
+    if len(pixel_spacetime_data) != len(pixel_track_labels_data):
         raise ValueError(
-            "Spacetime and track labels must have matching event and hit dimensions"
+            "Mismatch in number of events between pixel spacetime and track labels"
         )
 
-    events = []
     padding_value = -999  # Assuming same padding value as in root_to_numpy.py
 
-    for i in range(spacetime_data.shape[0]):
+    pixel_data = []
+    mppc_data = []
+
+    for i in range(len(pixel_spacetime_data)):
         # Filter out padded entries (assuming padding value is -999)
-        spacetime_event = spacetime_data[i]
-        track_labels_event = track_labels_data[i]
+        pixel_spacetime_event = pixel_spacetime_data[i]
+        pixel_track_labels_event = pixel_track_labels_data[i]
+        mppc_spacetime_event = mppc_spacetime_data[i]
+        mppc_track_labels_event = mppc_track_labels_data[i]
 
         # Valid entries have time != padding_value (time is last feature)
-        if has_layer_feature:
-            valid_mask = spacetime_event[:, 4] != padding_value  # time at index 4
-        else:
-            valid_mask = spacetime_event[:, 3] != padding_value  # time at index 3
+        valid_mask_pixel = pixel_spacetime_event[:, -1] != padding_value
+        valid_mask_mppc = mppc_spacetime_event[:, -1] != padding_value
 
-        if valid_mask.sum() > 0:  # Only include events with valid hits
-            event_data = EventData(
+        if (valid_mask_mppc.sum() > 1) & (
+            valid_mask_pixel.sum() > 1
+        ):  # Only include events with valid hits
+            pixel_event = EventData(
                 spacetime=torch.tensor(
-                    spacetime_event[valid_mask], dtype=torch.float32
+                    pixel_spacetime_event[valid_mask_pixel], dtype=torch.float
                 ),
                 track_labels=torch.tensor(
-                    track_labels_event[valid_mask], dtype=torch.float32
+                    pixel_track_labels_event[valid_mask_pixel], dtype=torch.float
                 ),
                 has_layer_feature=has_layer_feature,
             )
-            events.append(event_data)
-
-    return events
+            mppc_event = EventData(
+                spacetime=torch.tensor(
+                    mppc_spacetime_event[valid_mask_mppc], dtype=torch.float
+                ),
+                track_labels=torch.tensor(
+                    mppc_track_labels_event[valid_mask_mppc], dtype=torch.float
+                ),
+                has_layer_feature=has_layer_feature,
+            )
+            pixel_data.append(pixel_event)
+            mppc_data.append(mppc_event)
+            if max_events is not None and len(pixel_data) >= max_events:
+                break
+    return pixel_data, mppc_data
 
 
 def group_time_slices_into_sequences(
@@ -294,6 +320,23 @@ class GraphBuilderBase(ABC):
     def get_node_dims(self) -> Dict[str, int]:
         """Return dictionary of node feature dimensions per node type."""
         pass
+
+    def build_graphs_from_event(
+        self, pixel_event: EventData, mppc_event: EventData
+    ) -> Union[List[HeteroData], List[List[HeteroData]]]:
+        pixel_data = pixel_event.to_detector_data()
+        mppc_data = mppc_event.to_detector_data()
+
+        if self.sequence_mode:
+            return self._build_sequence_graphs(pixel_data, mppc_data)
+        else:
+            graphs = []
+            for time_slice in torch.unique(pixel_data.times):
+                time_graphs = self._create_graphs_for_time_slice(
+                    pixel_data, mppc_data, time_slice
+                )
+                graphs.extend(time_graphs)
+            return graphs
 
 
 class HeteroGraphBuilder(GraphBuilderBase):
@@ -407,24 +450,6 @@ class HeteroGraphBuilder(GraphBuilderBase):
 
         return [graph] if edges_created >= 1 else []
 
-    def build_graphs_from_event(
-        self, pixel_event: EventData, mppc_event: EventData
-    ) -> Union[List[HeteroData], List[List[HeteroData]]]:
-        """Build heterogeneous graphs from pixel and MPPC event data."""
-        pixel_data = pixel_event.to_detector_data()
-        mppc_data = mppc_event.to_detector_data()
-
-        if self.sequence_mode:
-            return self._build_sequence_graphs(pixel_data, mppc_data)
-        else:
-            graphs = []
-            for time_slice in torch.unique(pixel_data.times):
-                time_graphs = self._create_graphs_for_time_slice(
-                    pixel_data, mppc_data, time_slice
-                )
-                graphs.extend(time_graphs)
-            return graphs
-
     def get_edge_types(self) -> List[Tuple[str, str, str]]:
         """Return list of edge types in the graph."""
         return [config.edge_type for config in self.edge_configs]
@@ -447,154 +472,6 @@ class HeteroGraphBuilder(GraphBuilderBase):
             if pixel_data.has_sufficient_data() and mppc_data.has_sufficient_data():
                 viable_indices.append(idx)
         return viable_indices
-
-
-class CombinedGraphBuilder(GraphBuilderBase):
-    """Builder for combined homogeneous graphs with type features (0=MPPC, 1=pixel)."""
-
-    def __init__(
-        self,
-        connect_layers: bool = True,
-        mppc_timing_cutoff: float = 0.1,
-        sequence_mode: bool = False,
-    ):
-        super().__init__(connect_layers, sequence_mode)
-        self.mppc_timing_cutoff = mppc_timing_cutoff
-
-    def _create_combined_edges(
-        self, combined_data: DetectorData, num_pixel: int
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Create edges for combined pixel+MPPC nodes."""
-        if len(combined_data) < 2:
-            return None, None
-
-        row, col = generate_all_pairs(
-            len(combined_data), len(combined_data), include_self=False, same_type=True
-        )
-
-        if self.connect_layers and row.numel() > 0:
-            # Complex layer logic from original code
-            layer_diff_mask = (
-                combined_data.layers[row] - combined_data.layers[col]
-            ).abs() <= 1
-
-            # Exclude connections between layers 2 and 3
-            layer_23_mask = ~(
-                ((combined_data.layers[row] == 2) & (combined_data.layers[col] == 3))
-                | ((combined_data.layers[row] == 3) & (combined_data.layers[col] == 2))
-            )
-
-            # Exclude MPPC-MPPC connections with large time differences
-            mppc_timing_mask = ~(
-                (combined_data.layers[row] == 2.5)
-                & (combined_data.layers[col] == 2.5)
-                & (
-                    torch.abs(combined_data.times[row] - combined_data.times[col])
-                    > self.mppc_timing_cutoff
-                )
-            )
-
-            edge_mask = layer_diff_mask & layer_23_mask & mppc_timing_mask
-            row, col = row[edge_mask], col[edge_mask]
-
-        if row.numel() == 0:
-            return None, None
-
-        edge_labels = self._create_edge_labels(
-            combined_data.tracks, combined_data.tracks, row, col
-        )
-        edge_index = torch.stack([row, col], dim=0)
-
-        return edge_index, edge_labels
-
-    def _create_graphs_for_time_slice(
-        self,
-        pixel_data: DetectorData,
-        mppc_data: DetectorData,
-        time_slice: torch.Tensor,
-    ) -> List[Data]:
-        """Create combined homogeneous graphs for a specific time slice."""
-        pixel_t = pixel_data.filter_by_time(time_slice)
-        mppc_cut_times = (mppc_data.times // 8) * 8
-        mppc_mask = mppc_cut_times == time_slice
-
-        if not pixel_t.has_sufficient_data() or mppc_mask.sum() < 2:
-            return []
-
-        # Create combined node features with type indicator
-        pixel_nodes = torch.cat(
-            [
-                pixel_t.positions,  # x, y, z
-                pixel_t.layers.unsqueeze(1),  # layer
-                torch.ones(
-                    (len(pixel_t), 1), device=pixel_t.positions.device
-                ),  # Type: 1=pixel
-                torch.full(
-                    (len(pixel_t), 1), time_slice, device=pixel_t.positions.device
-                ),  # time
-            ],
-            dim=1,
-        )
-
-        mppc_nodes = torch.cat(
-            [
-                mppc_data.positions[mppc_mask],  # x, y, z
-                mppc_data.layers[mppc_mask].unsqueeze(1),  # layer (2.5 for MPPC)
-                torch.zeros(
-                    (mppc_mask.sum(), 1), device=mppc_data.positions.device
-                ),  # Type: 0=MPPC
-                mppc_data.times[mppc_mask].unsqueeze(1),  # actual time
-            ],
-            dim=1,
-        )
-
-        # Combine all data
-        combined_nodes = torch.cat([pixel_nodes, mppc_nodes], dim=0)
-        combined_data = DetectorData(
-            positions=combined_nodes,  # Now includes [x, y, z, layer, type, time]
-            tracks=torch.cat([pixel_t.tracks, mppc_data.tracks[mppc_mask]], dim=0),
-            layers=torch.cat([pixel_t.layers, mppc_data.layers[mppc_mask]], dim=0),
-            times=torch.cat([pixel_t.times, mppc_data.times[mppc_mask]], dim=0),
-        )
-
-        edge_index, edge_labels = self._create_combined_edges(
-            combined_data, len(pixel_t)
-        )
-
-        graphs = []
-        if edge_index is not None:
-            graph = Data(
-                x=combined_nodes, edge_index=edge_index, edge_labels=edge_labels
-            )
-
-            # Add track truth if available
-            if pixel_t.track_truth is not None and mppc_data.track_truth is not None:
-                combined_track_truth = torch.cat(
-                    [pixel_t.track_truth, mppc_data.track_truth[mppc_mask]], dim=0
-                )
-                graph.track_truth = combined_track_truth
-
-            graphs.append(graph)
-
-        return graphs
-
-    def build_graphs_from_event(
-        self, pixel_event: EventData, mppc_event: EventData
-    ) -> Union[List[Data], List[List[Data]]]:
-        """Build combined homogeneous graphs from event data."""
-        pixel_data = pixel_event.to_detector_data()
-        mppc_data = mppc_event.to_detector_data()
-
-        if self.sequence_mode:
-            return self._build_sequence_graphs(pixel_data, mppc_data)
-        else:
-            graphs = []
-            for time_slice in torch.unique(pixel_data.times):
-                time_graphs = self._create_graphs_for_time_slice(
-                    pixel_data, mppc_data, time_slice
-                )
-                graphs.extend(time_graphs)
-            return graphs
 
 
 class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
@@ -798,24 +675,6 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
 
         return [graph] if edges_added > 0 else []
 
-    def build_graphs_from_event(
-        self, pixel_event: EventData, mppc_event: EventData
-    ) -> Union[List[HeteroData], List[List[HeteroData]]]:
-        """Build layer-separated heterogeneous graphs from event data."""
-        pixel_data = pixel_event.to_detector_data()
-        mppc_data = mppc_event.to_detector_data()
-
-        if self.sequence_mode:
-            return self._build_sequence_graphs(pixel_data, mppc_data)
-        else:
-            graphs = []
-            for time_slice in torch.unique(pixel_data.times):
-                time_graphs = self._create_graphs_for_time_slice(
-                    pixel_data, mppc_data, time_slice
-                )
-                graphs.extend(time_graphs)
-            return graphs
-
     def get_viable_event_indices(
         self,
         pixel_events: List[EventData],
@@ -854,176 +713,246 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
 
 
 class DetectorDataset(Dataset):
-    """PyTorch Geometric Dataset for detector data from .npy files."""
+    """Dataset for detector graphs from .npy files using a specified graph builder."""
 
     def __init__(
         self,
-        pixel_spacetime_path: str,
-        pixel_track_labels_path: str,
-        mppc_spacetime_path: str,
-        mppc_track_labels_path: str,
-        graph_builder: GraphBuilderBase,
-        has_layer_feature: bool = False,
+        pixel_events,
+        mppc_events,
+        graph_builder: Optional[GraphBuilderBase] = None,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None,
-        cache_dir: Optional[str] = None,
     ):
+        super().__init__(None, transform, pre_transform, pre_filter)
+        self.length = 0
+        self.graphs = []
+        if len(pixel_events) != len(mppc_events):
+            raise ValueError("Pixel and MPPC data must have the same number of events")
 
-        self.pixel_spacetime_path = pixel_spacetime_path
-        self.pixel_track_labels_path = pixel_track_labels_path
-        self.mppc_spacetime_path = mppc_spacetime_path
-        self.mppc_track_labels_path = mppc_track_labels_path
-        self.has_layer_feature = has_layer_feature
-        self.graph_builder = graph_builder
+        if graph_builder is None:
+            self.graph_builder = HeteroGraphBuilder(sequence_mode=False)
+        else:
+            self.graph_builder = graph_builder
 
-        # Load event data
-        self.pixel_events = load_npy_data(
-            pixel_spacetime_path, pixel_track_labels_path, has_layer_feature
-        )
-        self.mppc_events = load_npy_data(
-            mppc_spacetime_path, mppc_track_labels_path, has_layer_feature
-        )
+        # Precompute all graphs
+        self._prepare_graphs(pixel_events, mppc_events)
 
-        if len(self.pixel_events) != len(self.mppc_events):
-            raise ValueError("Number of pixel and MPPC events must match")
-
-        super().__init__(
-            transform=transform, pre_transform=pre_transform, pre_filter=pre_filter
-        )
-        if cache_dir is not None:
-            os.makedirs(cache_dir, exist_ok=True)
-            cache_path = os.path.join(cache_dir, "detector_dataset_cache.pt")
-
-    def precompute(self, cache_path: str):
-        """Precompute and cache the dataset."""
-        data_list = []
-        for idx in range(len(self)):
-            graphs = self[idx]
-            if isinstance(graphs, list):
-                data_list.extend(graphs)
+    def _prepare_graphs(self, pixel_events, mppc_events):
+        """Prepare graphs for all events."""
+        graphs = []
+        for pixel_event, mppc_event in zip(pixel_events, mppc_events):
+            event_graphs = self.graph_builder.build_graphs_from_event(
+                pixel_event, mppc_event
+            )
+            if self.graph_builder.sequence_mode:
+                graphs.extend(event_graphs)  # List of sequences
             else:
-                data_list.append(graphs)
+                graphs.extend(event_graphs)  # List of single graphs
 
-        torch.save(data_list, cache_path)
-        print(f"Dataset cached at {cache_path}")
+        # Apply pre_filter if provided
+        if self.pre_filter is not None:
+            graphs = [g for g in self.graphs if self.pre_filter(g)]
+        # Apply pre_transform if provided
+        if self.pre_transform is not None:
+            graphs = [self.pre_transform(g) for g in self.graphs]
+        self.length = len(graphs)
+        self.graphs = graphs
+
+    def get_edge_types(self) -> List[Tuple[str, str, str]]:
+        return self.graph_builder.get_edge_types()
+
+    def get_node_dims(self) -> Dict[str, int]:
+        return self.graph_builder.get_node_dims()
 
     def len(self) -> int:
-        return len(self.pixel_events)
+        return self.length
 
-    def get(
-        self, idx: int
-    ) -> Union[List[Union[Data, HeteroData]], List[List[Union[Data, HeteroData]]]]:
-        """Get graphs for a specific event."""
-        pixel_event = self.pixel_events[idx]
-        mppc_event = self.mppc_events[idx]
-        return self.graph_builder.build_graphs_from_event(pixel_event, mppc_event)
-
-    def get_node_dims(self) -> Optional[Dict[str, int]]:
-        """Get node feature dimensions if available."""
-        if hasattr(self.graph_builder, "get_node_dims"):
-            return self.graph_builder.get_node_dims()
-        return None
-
-    def get_edge_types(self) -> Optional[List[Tuple[str, str, str]]]:
-        """Get edge types if available."""
-        if hasattr(self.graph_builder, "get_edge_types"):
-            return self.graph_builder.get_edge_types()
-        return None
+    def get(self, idx: int) -> Union[Data, HeteroData, List[Union[Data, HeteroData]]]:
+        return self.graphs[idx]
 
 
 class SequenceDataset(Dataset):
-    """Dataset that returns sequences of graphs with varying lengths."""
+    """Dataset that returns sequences of graphs and labels for each sequence with varying lengths.
 
-    def __init__(self, base_dataset: DetectorDataset):
-        self.base_dataset = base_dataset
+    Args:
+        prefices: List of file path prefixes for the .npy data files.
+        labels: List of integer labels corresponding to each prefix.
+        has_layer_feature: Whether the pixel spacetime data includes layer information.
+        graph_builder: Instance of GraphBuilderBase to use for graph construction.
+        transform: Optional transform to apply to each graph.
+        pre_transform: Optional pre-transform to apply to each graph before saving.
+        pre_filter: Optional filter to apply to each graph before saving.
+    Returns:
+        List of tuples (graph_sequence, label) where graph_sequence is a list of graphs for the sequence.
+    """
+
+    def __init__(
+        self,
+        mppc_events: List[EventData],
+        pixel_events: List[EventData],
+        labels: List[int],
+        has_layer_feature: bool = False,
+        graph_builder: Optional[GraphBuilderBase] = None,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
+    ):
+        if len(pixel_events) != len(mppc_events):
+            raise ValueError("Pixel and MPPC data must have the same number of events")
+        if len(pixel_events) != len(labels):
+            raise ValueError("Number of events must match number of labels")
+        super().__init__(None, transform, pre_transform, pre_filter)
+        self.length = 0
         self.sequences = []
+        self.labels = labels
 
-        # Pre-compute all sequences
-        for i in range(len(base_dataset)):
-            graphs = base_dataset[i]
-            if len(graphs) > 0 and isinstance(graphs[0], list):  # Sequence mode
-                self.sequences.extend(graphs)
+        if graph_builder is None:
+            self.graph_builder = HeteroGraphBuilder(sequence_mode=True)
+        else:
+            self.graph_builder = graph_builder
+        if not self.graph_builder.sequence_mode:
+            raise ValueError(
+                "Graph builder must be in sequence mode for SequenceDataset"
+            )
+        # Precompute all sequences
+        self._prepare_sequences(pixel_events, mppc_events)
 
-        super().__init__()
+    def _prepare_sequences(self, pixel_events, mppc_events):
+        """Prepare sequences for all events."""
+        sequences = []
+        for pixel_event, mppc_event in zip(pixel_events, mppc_events):
+            event_sequences = self.graph_builder.build_graphs_from_event(
+                pixel_event, mppc_event
+            )
+            sequences.extend(event_sequences)  # List of sequences
+
+        # Apply pre_filter if provided
+        if self.pre_filter is not None:
+            sequences = [s for s in self.sequences if self.pre_filter(s)]
+        # Apply pre_transform if provided
+        if self.pre_transform is not None:
+            sequences = [self.pre_transform(s) for s in self.sequences]
+        self.length = len(sequences)
+        self.sequences = sequences
+
+    def get_edge_types(self) -> List[Tuple[str, str, str]]:
+        return self.graph_builder.get_edge_types()
+
+    def get_node_dims(self) -> Dict[str, int]:
+        return self.graph_builder.get_node_dims()
 
     def len(self) -> int:
-        return len(self.sequences)
+        return self.length
 
-    def get(self, idx: int) -> List[Union[Data, HeteroData]]:
-        return self.sequences[idx]
+    def get(self, idx: int) -> Tuple[List[Union[Data, HeteroData]], int]:
+        return self.sequences[idx], self.labels[idx]
 
 
 # Factory functions for creating datasets
-def create_hetero_dataset(
-    prefix: str,
+def create_dataset(
+    prefix: Union[str, List[str]],
+    split=(1,),
+    labels: Optional[List[int]] = None,
+    n_events: Optional[int] = None,
     has_layer_feature: bool = False,
-    sequence_mode: bool = False,
     mppc_timing_cutoff: float = 0.2,
-) -> DetectorDataset:
-    """Create a dataset for heterogeneous graphs."""
-    builder = HeteroGraphBuilder(
-        sequence_mode=sequence_mode, mppc_timing_cutoff=mppc_timing_cutoff
-    )
-    pixel_spacetime_path = f"{prefix}_pixel_spacetime.npy"
-    pixel_track_labels_path = f"{prefix}_pixel_track_labels.npy"
-    mppc_spacetime_path = f"{prefix}_mppc_spacetime.npy"
-    mppc_track_labels_path = f"{prefix}_mppc_track_labels.npy"
-    return DetectorDataset(
-        pixel_spacetime_path=pixel_spacetime_path,
-        pixel_track_labels_path=pixel_track_labels_path,
-        mppc_spacetime_path=mppc_spacetime_path,
-        mppc_track_labels_path=mppc_track_labels_path,
-        has_layer_feature=has_layer_feature,
-        graph_builder=builder,
-    )
-
-
-def create_combined_dataset(
-    prefix: str,
-    has_layer_feature: bool = False,
+    type: str = "hetero",
     sequence_mode: bool = False,
-    mppc_timing_cutoff: float = 0.1,
-) -> DetectorDataset:
-    """Create a dataset for combined homogeneous graphs with type features."""
-    builder = CombinedGraphBuilder(
-        sequence_mode=sequence_mode, mppc_timing_cutoff=mppc_timing_cutoff
-    )
-    pixel_spacetime_path = f"{prefix}_pixel_spacetime.npy"
-    pixel_track_labels_path = f"{prefix}_pixel_track_labels.npy"
-    mppc_spacetime_path = f"{prefix}_mppc_spacetime.npy"
-    mppc_track_labels_path = f"{prefix}_mppc_track_labels.npy"
+) -> Union[DetectorDataset, Tuple[DetectorDataset, ...], SequenceDataset, Tuple[SequenceDataset, ...]]:
+    """Create a DetectorDataset from .npy files.
+    Args:
+        prefix: File path prefix or list of prefixes for the .npy data files.
+        split: Tuple of fractions for (train, val, test) splits. Must sum to 1.
+        labels: Optional list of integer labels corresponding to each prefix.
+        n_events: Optional maximum number of events to load from each file.
+        has_layer_feature: Whether the pixel spacetime data includes layer information.
+        mppc_timing_cutoff: Timing cutoff in ns for MPPC-MPPC edges.
+        type: Type of graph builder to use ('hetero' or 'layer_separated').
+        sequence_mode: Whether to build sequences of graphs (True) or single graphs (False).
 
-    return DetectorDataset(
-        pixel_spacetime_path=pixel_spacetime_path,
-        pixel_track_labels_path=pixel_track_labels_path,
-        mppc_spacetime_path=mppc_spacetime_path,
-        mppc_track_labels_path=mppc_track_labels_path,
-        has_layer_feature=has_layer_feature,
-        graph_builder=builder,
-    )
+    Returns:
+        Instance(s) of DetectorDataset with the specified configuration.
+    """
 
 
-def create_layer_separated_dataset(
-    prefix: str,
-    has_layer_feature: bool = False,
-    sequence_mode: bool = False,
-    mppc_timing_cutoff: float = 0.2,
-) -> DetectorDataset:
-    """Create a dataset for layer-separated heterogeneous graphs."""
-    builder = LayerSeparatedHeteroGraphBuilder(
-        sequence_mode=sequence_mode, mppc_timing_cutoff=mppc_timing_cutoff
-    )
-    pixel_spacetime_path = f"{prefix}_pixel_spacetime.npy"
-    pixel_track_labels_path = f"{prefix}_pixel_track_labels.npy"
-    mppc_spacetime_path = f"{prefix}_mppc_spacetime.npy"
-    mppc_track_labels_path = f"{prefix}_mppc_track_labels.npy"
+    if isinstance(prefix, str):
+        prefix = [prefix]
+    if labels is not None and len(prefix) != len(labels):
+        raise ValueError("Number of prefixes must match number of labels")
+    all_pixel_events = []
+    all_mppc_events = []
+    all_labels = []
+    for i, p in enumerate(prefix):
+        pixel_spacetime_path = f"{p}_pixel_spacetime.npy"
+        pixel_track_labels_path = f"{p}_pixel_track_labels.npy"
+        mppc_spacetime_path = f"{p}_mppc_spacetime.npy"
+        mppc_track_labels_path = f"{p}_mppc_track_labels.npy"
+        pixel_events, mppc_events = load_npy_data(
+            pixel_spacetime_path,
+            pixel_track_labels_path,
+            mppc_spacetime_path,
+            mppc_track_labels_path,
+            has_layer_feature,
+            max_events=n_events,
+        )
+        all_pixel_events.extend(pixel_events)
+        all_mppc_events.extend(mppc_events)
+        if labels is not None:
+            all_labels.extend([labels[i]] * len(pixel_events))
+        else:
+            all_labels.extend([0] * len(pixel_events))  # Dummy labels if none provided
 
-    return DetectorDataset(
-        pixel_spacetime_path=pixel_spacetime_path,
-        pixel_track_labels_path=pixel_track_labels_path,
-        mppc_spacetime_path=mppc_spacetime_path,
-        mppc_track_labels_path=mppc_track_labels_path,
-        has_layer_feature=has_layer_feature,
-        graph_builder=builder,
-    )
+    if (
+        len(split) < 0
+        or not all(0 < s <= 1 for s in split)
+        or not abs(sum(split) - 1.0) < 1e-6
+    ):
+        raise ValueError("Split must be a tuple of three fractions summing to 1")
+    n_events = len(pixel_events)
+    if n_events != len(mppc_events):
+        raise ValueError("Pixel and MPPC data must have the same number of events")
+    n_splits = len(split)
+    split_indices = [int(sum(split[:i]) * n_events) for i in range(n_splits)]
+    split_indices.append(n_events)  # Ensure we include all events
+    datasets = []
+    builder = None
+    if type == "hetero":
+        builder = HeteroGraphBuilder(
+            connect_layers=True,
+            mppc_timing_cutoff=mppc_timing_cutoff,
+            sequence_mode=sequence_mode,
+        )
+    elif type == "layer_separated":
+        builder = LayerSeparatedHeteroGraphBuilder(
+            connect_layers=True,
+            mppc_timing_cutoff=mppc_timing_cutoff,
+            sequence_mode=sequence_mode,
+        )
+    else:
+        raise ValueError(f"Unknown graph builder type: {type}")
+
+    for i in range(n_splits):
+        start_idx = split_indices[i]
+        end_idx = split_indices[i + 1]
+        pixel_subset = pixel_events[start_idx:end_idx]
+        mppc_subset = mppc_events[start_idx:end_idx]
+        dataset = None
+        if sequence_mode:
+            # For sequence mode, we need dummy labels (e.g., all zeros)
+            labels = [0] * len(pixel_subset)
+            dataset = SequenceDataset(
+                mppc_subset,
+                pixel_subset,
+                labels,
+                has_layer_feature,
+                graph_builder=builder,
+            )
+        else:
+            dataset = DetectorDataset(
+                pixel_subset,
+                mppc_subset,
+                graph_builder=builder,
+            )
+        datasets.append(dataset)
+    return tuple(datasets) if n_splits > 1 else datasets[0]
