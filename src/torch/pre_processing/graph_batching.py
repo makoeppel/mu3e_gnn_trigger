@@ -261,17 +261,17 @@ class GraphBuilderBase(ABC):
     """Abstract base class for graph builders."""
 
     def __init__(
-        self, 
-        connect_layers: bool = True, 
-        sequence_mode: bool = False, 
+        self,
+        connect_layers: bool = True,
+        sequence_mode: bool = False,
         whole_event_mode: bool = False,
-        timing_cutoff: float = 8.0
+        timing_cutoff: float = 8.0,
     ):
         self.connect_layers = connect_layers
         self.sequence_mode = sequence_mode
         self.whole_event_mode = whole_event_mode
         self.timing_cutoff = timing_cutoff
-        
+
         if sequence_mode and whole_event_mode:
             raise ValueError("Cannot enable both sequence_mode and whole_event_mode")
 
@@ -408,7 +408,7 @@ class HeteroGraphBuilder(GraphBuilderBase):
         # Apply timing constraints
         if row.numel() > 0:
             time_diff = (src_data.times[row] - dst_data.times[col]).abs()
-            
+
             if self.whole_event_mode and not config.use_timing:
                 # In whole event mode, apply global timing cutoff
                 timing_mask = time_diff <= self.timing_cutoff
@@ -418,7 +418,7 @@ class HeteroGraphBuilder(GraphBuilderBase):
             else:
                 # No timing constraint for this edge type in slice mode
                 timing_mask = torch.ones_like(time_diff, dtype=torch.bool)
-            
+
             row, col = row[timing_mask], col[timing_mask]
 
         if row.numel() == 0:
@@ -500,7 +500,8 @@ class HeteroGraphBuilder(GraphBuilderBase):
         # Create graph with node features
         graph = HeteroData()
         graph["pixel"].x = torch.cat(
-            [pixel_data.positions, pixel_data.layers.unsqueeze(1)], dim=1
+            [pixel_data.positions, pixel_data.times, pixel_data.layers.unsqueeze(1)],
+            dim=1,
         )
         graph["mppc"].x = torch.cat(
             [mppc_data.positions, mppc_data.times.unsqueeze(1)], dim=1
@@ -535,10 +536,10 @@ class HeteroGraphBuilder(GraphBuilderBase):
 
     def get_node_dims(self) -> Dict[str, int]:
         """Return dictionary of node feature dimensions per node type."""
-        return {
-            "pixel": 4,  # x, y, z, layer
-            "mppc": 4,  # x, y, z, time
-        }
+        if self.whole_event_mode:
+            return {"pixel": 5, "mppc": 4}  # [x,y,z,time,layer] and [x,y,z,time]
+        else:
+            return {"pixel": 4, "mppc": 4}  # [x,y,z,layer] and [x,y,z,time]
 
     def get_viable_event_indices(
         self, pixel_events: List[EventData], mppc_events: List[EventData]
@@ -675,7 +676,7 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         # Apply timing constraints
         if row.numel() > 0:
             time_diff = (src_data.times[row] - dst_data.times[col]).abs()
-            
+
             if self.whole_event_mode:
                 # In whole event mode, apply global timing cutoff to all edges
                 timing_mask = time_diff <= self.timing_cutoff
@@ -685,7 +686,7 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
             else:
                 # No timing constraint for this edge type in slice mode
                 timing_mask = torch.ones_like(time_diff, dtype=torch.bool)
-            
+
             row, col = row[timing_mask], col[timing_mask]
 
         if row.numel() == 0:
@@ -846,13 +847,22 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
 
     def get_node_dims(self) -> Dict[str, int]:
         """Return dictionary of node feature dimensions per node type."""
-        return {
-            "layer_1": 3,  # x, y, z
-            "layer_2": 3,  # x, y, z
-            "mppc": 4,  # x, y, z, time
-            "layer_3": 3,  # x, y, z
-            "layer_4": 3,  # x, y, z
-        }
+        if self.whole_event_mode:
+            return {
+                "layer_1": 3,
+                "layer_2": 3,
+                "mppc": 4,  # [x,y,z,time]
+                "layer_3": 3,
+                "layer_4": 3,
+            }
+        else:
+            return {
+                "layer_1": 3,
+                "layer_2": 3,
+                "mppc": 4,  # [x,y,z,time]
+                "layer_3": 3,
+                "layer_4": 3,
+            }
 
 
 class DetectorDataset(Dataset):
@@ -1004,7 +1014,12 @@ def create_dataset(
     sequence_mode: bool = False,
     whole_event_mode: bool = False,
     timing_cutoff: float = 8.0,
-) -> Union[DetectorDataset, Tuple[DetectorDataset, ...], SequenceDataset, Tuple[SequenceDataset, ...]]:
+) -> Union[
+    DetectorDataset,
+    Tuple[DetectorDataset, ...],
+    SequenceDataset,
+    Tuple[SequenceDataset, ...],
+]:
     """Create a DetectorDataset from .npy files.
     Args:
         prefix: File path prefix or list of prefixes for the .npy data files.
