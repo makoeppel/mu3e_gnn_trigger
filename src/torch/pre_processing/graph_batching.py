@@ -6,9 +6,10 @@ This module provides PyTorch Geometric compatible classes for building different
 - CombinedGraphBuilder: Homogeneous graphs with type features (0=MPPC, 1=pixel)
 - LayerSeparatedHeteroGraphBuilder: Layer-separated heterogeneous graphs (layer_1, layer_2, layer_3, layer_4, mppc)
 
-Supports two processing modes:
+Supports three processing modes:
 1. Single slice mode: Create graphs of 8ns time slices for individual classification
 2. Sequence mode: Create sequences of graphs with varying lengths for per-sequence classification
+3. Whole event mode: Create single graphs from entire events with 8ns timing constraints on edges
 """
 
 import torch
@@ -259,9 +260,20 @@ def group_time_slices_into_sequences(
 class GraphBuilderBase(ABC):
     """Abstract base class for graph builders."""
 
-    def __init__(self, connect_layers: bool = True, sequence_mode: bool = False):
+    def __init__(
+        self, 
+        connect_layers: bool = True, 
+        sequence_mode: bool = False, 
+        whole_event_mode: bool = False,
+        timing_cutoff: float = 8.0
+    ):
         self.connect_layers = connect_layers
         self.sequence_mode = sequence_mode
+        self.whole_event_mode = whole_event_mode
+        self.timing_cutoff = timing_cutoff
+        
+        if sequence_mode and whole_event_mode:
+            raise ValueError("Cannot enable both sequence_mode and whole_event_mode")
 
     def _create_edge_labels(
         self,
@@ -312,6 +324,15 @@ class GraphBuilderBase(ABC):
         pass
 
     @abstractmethod
+    def _create_whole_event_graph(
+        self,
+        pixel_data: DetectorData,
+        mppc_data: DetectorData,
+    ) -> List[Union[Data, HeteroData]]:
+        """Create a single graph from the entire event with timing constraints."""
+        pass
+
+    @abstractmethod
     def get_edge_types(self) -> List[Tuple[str, str, str]]:
         """Return list of edge types in the graph."""
         pass
@@ -327,7 +348,9 @@ class GraphBuilderBase(ABC):
         pixel_data = pixel_event.to_detector_data()
         mppc_data = mppc_event.to_detector_data()
 
-        if self.sequence_mode:
+        if self.whole_event_mode:
+            return self._create_whole_event_graph(pixel_data, mppc_data)
+        elif self.sequence_mode:
             return self._build_sequence_graphs(pixel_data, mppc_data)
         else:
             graphs = []
@@ -347,8 +370,10 @@ class HeteroGraphBuilder(GraphBuilderBase):
         connect_layers: bool = True,
         mppc_timing_cutoff: float = 0.2,
         sequence_mode: bool = False,
+        whole_event_mode: bool = False,
+        timing_cutoff: float = 8.0,
     ):
-        super().__init__(connect_layers, sequence_mode)
+        super().__init__(connect_layers, sequence_mode, whole_event_mode, timing_cutoff)
         self.mppc_timing_cutoff = mppc_timing_cutoff
         self.edge_configs = [
             EdgeConfig("pixel", "pixel", ("pixel", "to", "pixel"), True, False, True),
@@ -380,10 +405,20 @@ class HeteroGraphBuilder(GraphBuilderBase):
             )
             row, col = row[layer_mask], col[layer_mask]
 
-        # Apply timing constraints for MPPC
-        if config.use_timing and row.numel() > 0:
+        # Apply timing constraints
+        if row.numel() > 0:
             time_diff = (src_data.times[row] - dst_data.times[col]).abs()
-            timing_mask = time_diff <= self.mppc_timing_cutoff
+            
+            if self.whole_event_mode and not config.use_timing:
+                # In whole event mode, apply global timing cutoff
+                timing_mask = time_diff <= self.timing_cutoff
+            elif config.use_timing:
+                # In slice mode, apply MPPC-specific timing cutoff
+                timing_mask = time_diff <= self.mppc_timing_cutoff
+            else:
+                # No timing constraint for this edge type in slice mode
+                timing_mask = torch.ones_like(time_diff, dtype=torch.bool)
+            
             row, col = row[timing_mask], col[timing_mask]
 
         if row.numel() == 0:
@@ -422,7 +457,9 @@ class HeteroGraphBuilder(GraphBuilderBase):
 
         # Create graph with node features
         graph = HeteroData()
-        graph["pixel"].x = pixel_t.positions
+        graph["pixel"].x = torch.cat(
+            [pixel_t.positions, pixel_t.layers.unsqueeze(1)], dim=1
+        )
         graph["mppc"].x = torch.cat(
             [mppc_t.positions, mppc_t.times.unsqueeze(1)], dim=1
         )
@@ -450,6 +487,48 @@ class HeteroGraphBuilder(GraphBuilderBase):
 
         return [graph] if edges_created >= 1 else []
 
+    def _create_whole_event_graph(
+        self,
+        pixel_data: DetectorData,
+        mppc_data: DetectorData,
+    ) -> List[HeteroData]:
+        """Create a single graph from the entire event with timing constraints."""
+        # Skip if insufficient data
+        if not pixel_data.has_sufficient_data() or not mppc_data.has_sufficient_data():
+            return []
+
+        # Create graph with node features
+        graph = HeteroData()
+        graph["pixel"].x = torch.cat(
+            [pixel_data.positions, pixel_data.layers.unsqueeze(1)], dim=1
+        )
+        graph["mppc"].x = torch.cat(
+            [mppc_data.positions, mppc_data.times.unsqueeze(1)], dim=1
+        )
+
+        # Add track truth information if available
+        if pixel_data.track_truth is not None:
+            graph["pixel"].track_truth = pixel_data.track_truth
+        if mppc_data.track_truth is not None:
+            graph["mppc"].track_truth = mppc_data.track_truth
+
+        # Create edges for all configured types
+        data_map = {"pixel": pixel_data, "mppc": mppc_data}
+        edges_created = 0
+
+        for config in self.edge_configs:
+            src_data = data_map[config.src_type]
+            dst_data = data_map[config.dst_type]
+
+            edge_index, edge_labels = self._create_edges(src_data, dst_data, config)
+
+            if edge_index is not None and edge_labels is not None:
+                graph[config.edge_type].edge_index = edge_index
+                graph[config.edge_type].edge_labels = edge_labels
+                edges_created += 1
+
+        return [graph] if edges_created >= 1 else []
+
     def get_edge_types(self) -> List[Tuple[str, str, str]]:
         """Return list of edge types in the graph."""
         return [config.edge_type for config in self.edge_configs]
@@ -457,7 +536,7 @@ class HeteroGraphBuilder(GraphBuilderBase):
     def get_node_dims(self) -> Dict[str, int]:
         """Return dictionary of node feature dimensions per node type."""
         return {
-            "pixel": 3,  # x, y, z
+            "pixel": 4,  # x, y, z, layer
             "mppc": 4,  # x, y, z, time
         }
 
@@ -485,8 +564,10 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         connect_layers: bool = True,
         mppc_timing_cutoff: float = 0.2,
         sequence_mode: bool = False,
+        whole_event_mode: bool = False,
+        timing_cutoff: float = 8.0,
     ):
-        super().__init__(connect_layers, sequence_mode)
+        super().__init__(connect_layers, sequence_mode, whole_event_mode, timing_cutoff)
         self.mppc_timing_cutoff = mppc_timing_cutoff
 
         # Define the connectivity pattern
@@ -591,10 +672,20 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         if row.numel() == 0:
             return None, None
 
-        # Apply timing constraints for MPPC-MPPC connections
-        if config.use_timing and row.numel() > 0:
+        # Apply timing constraints
+        if row.numel() > 0:
             time_diff = (src_data.times[row] - dst_data.times[col]).abs()
-            timing_mask = time_diff <= self.mppc_timing_cutoff
+            
+            if self.whole_event_mode:
+                # In whole event mode, apply global timing cutoff to all edges
+                timing_mask = time_diff <= self.timing_cutoff
+            elif config.use_timing:
+                # In slice mode, apply MPPC-specific timing cutoff
+                timing_mask = time_diff <= self.mppc_timing_cutoff
+            else:
+                # No timing constraint for this edge type in slice mode
+                timing_mask = torch.ones_like(time_diff, dtype=torch.bool)
+            
             row, col = row[timing_mask], col[timing_mask]
 
         if row.numel() == 0:
@@ -660,6 +751,58 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
 
         # Create data mapping for edge creation
         data_map = {**layer_data, "mppc": mppc_t}
+
+        # Create edges for all configured types
+        edges_added = 0
+        for config in self.edge_configs:
+            src_data = data_map[config.src_type]
+            dst_data = data_map[config.dst_type]
+
+            edge_index, edge_labels = self._create_edges(src_data, dst_data, config)
+            if edge_index is not None:
+                graph[config.edge_type].edge_index = edge_index
+                graph[config.edge_type].edge_labels = edge_labels
+                edges_added += 1
+
+        return [graph] if edges_added > 0 else []
+
+    def _create_whole_event_graph(
+        self,
+        pixel_data: DetectorData,
+        mppc_data: DetectorData,
+    ) -> List[HeteroData]:
+        """Create layer-separated heterogeneous graphs for the entire event."""
+        # Separate pixel data into layers
+        layer_data = self._separate_pixel_layers(pixel_data)
+
+        # Check if we have sufficient data - need connected path through the graph
+        if not (
+            len(layer_data["layer_2"]) > 0
+            and len(mppc_data) > 0
+            and len(layer_data["layer_3"]) > 0
+        ):
+            return []
+
+        # Create graph with node features
+        graph = HeteroData()
+
+        # Add layer nodes (only if they exist)
+        for layer_name, data in layer_data.items():
+            if len(data) > 0:
+                graph[layer_name].x = data.positions
+                if data.track_truth is not None:
+                    graph[layer_name].track_truth = data.track_truth
+
+        # Add MPPC nodes (include timing information)
+        if len(mppc_data) > 0:
+            graph["mppc"].x = torch.cat(
+                [mppc_data.positions, mppc_data.times.unsqueeze(1)], dim=1
+            )
+            if mppc_data.track_truth is not None:
+                graph["mppc"].track_truth = mppc_data.track_truth
+
+        # Create data mapping for edge creation
+        data_map = {**layer_data, "mppc": mppc_data}
 
         # Create edges for all configured types
         edges_added = 0
@@ -859,6 +1002,8 @@ def create_dataset(
     mppc_timing_cutoff: float = 0.2,
     type: str = "hetero",
     sequence_mode: bool = False,
+    whole_event_mode: bool = False,
+    timing_cutoff: float = 8.0,
 ) -> Union[DetectorDataset, Tuple[DetectorDataset, ...], SequenceDataset, Tuple[SequenceDataset, ...]]:
     """Create a DetectorDataset from .npy files.
     Args:
@@ -867,14 +1012,18 @@ def create_dataset(
         labels: Optional list of integer labels corresponding to each prefix.
         n_events: Optional maximum number of events to load from each file.
         has_layer_feature: Whether the pixel spacetime data includes layer information.
-        mppc_timing_cutoff: Timing cutoff in ns for MPPC-MPPC edges.
+        mppc_timing_cutoff: Timing cutoff in ns for MPPC-MPPC edges in slice mode.
         type: Type of graph builder to use ('hetero' or 'layer_separated').
         sequence_mode: Whether to build sequences of graphs (True) or single graphs (False).
+        whole_event_mode: Whether to build single graphs from entire events (True) or time slices (False).
+        timing_cutoff: Global timing cutoff in ns for edges in whole event mode (default 8.0ns).
 
     Returns:
         Instance(s) of DetectorDataset with the specified configuration.
     """
 
+    if sequence_mode and whole_event_mode:
+        raise ValueError("Cannot enable both sequence_mode and whole_event_mode")
 
     if isinstance(prefix, str):
         prefix = [prefix]
@@ -922,12 +1071,16 @@ def create_dataset(
             connect_layers=True,
             mppc_timing_cutoff=mppc_timing_cutoff,
             sequence_mode=sequence_mode,
+            whole_event_mode=whole_event_mode,
+            timing_cutoff=timing_cutoff,
         )
     elif type == "layer_separated":
         builder = LayerSeparatedHeteroGraphBuilder(
             connect_layers=True,
             mppc_timing_cutoff=mppc_timing_cutoff,
             sequence_mode=sequence_mode,
+            whole_event_mode=whole_event_mode,
+            timing_cutoff=timing_cutoff,
         )
     else:
         raise ValueError(f"Unknown graph builder type: {type}")
@@ -945,7 +1098,6 @@ def create_dataset(
                 mppc_subset,
                 pixel_subset,
                 labels,
-                has_layer_feature,
                 graph_builder=builder,
             )
         else:
