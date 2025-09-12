@@ -10,7 +10,7 @@ output = /afs/desy.de/user/a/aulich/mu3e_trigger/CONDOR/logs/$(script).$(ProcId)
 
 RequestCPUs    = 8
 RequestGPUs    = 1
-RequestMemory  = 40000
+RequestMemory  = 60000
 +RequestRuntime = 100000
 +MaxRuntime     = 100000
 

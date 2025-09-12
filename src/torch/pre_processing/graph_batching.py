@@ -500,7 +500,7 @@ class HeteroGraphBuilder(GraphBuilderBase):
         # Create graph with node features
         graph = HeteroData()
         graph["pixel"].x = torch.cat(
-            [pixel_data.positions, pixel_data.times, pixel_data.layers.unsqueeze(1)],
+            [pixel_data.positions, pixel_data.times.unsqueeze(1), pixel_data.layers.unsqueeze(1)],
             dim=1,
         )
         graph["mppc"].x = torch.cat(
@@ -790,7 +790,8 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
         # Add layer nodes (only if they exist)
         for layer_name, data in layer_data.items():
             if len(data) > 0:
-                graph[layer_name].x = data.positions
+                graph[layer_name].x = torch.cat([data.positions, data.times.unsqueeze(1)], dim=1
+                )
                 if data.track_truth is not None:
                     graph[layer_name].track_truth = data.track_truth
 

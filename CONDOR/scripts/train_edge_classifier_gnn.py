@@ -7,10 +7,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-DATA_DIR = "../mu3e_trigger_data"
-MODEL_DIR = "../models"
-PLOTS_DIR = "../plots"
-from src.data_preparation import load_numpy_files
+ROOT_DIR = "/afs/desy.de/user/a/aulich/mu3e_trigger"
+DATA_DIR = f"/data/dust/group/atlas/ttreco/mu3e_trigger_data"
+PLOTS_DIR = f"{ROOT_DIR}/plots"
+MODEL_DIR = f"{ROOT_DIR}/models"
+MODEL_NAME = "contrastive_loss"
 
 signal_prefix = f"{DATA_DIR}/sig"
 background_prefix = f"{DATA_DIR}/bg"
