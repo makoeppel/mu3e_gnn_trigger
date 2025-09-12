@@ -34,29 +34,43 @@ FRAME_LENGTH_8NS = 8
 
 class DataProcessingError(Exception):
     """Custom exception for data processing errors."""
+
     pass
 
 
-def convert_mppc_timestamp_to_ns(mppc_timestamp: np.ndarray, padding_value = DEFAULT_PADDING_VALUE) -> np.ndarray:
+def convert_mppc_timestamp_to_ns(
+    mppc_timestamp: np.ndarray, padding_value=DEFAULT_PADDING_VALUE
+) -> np.ndarray:
     """Convert MPPC timestamp to nanoseconds."""
     valid_mask = mppc_timestamp == padding_value
-    converted_mppc_timestamp = np.full_like(mppc_timestamp, padding_value, dtype=np.float32)
+    converted_mppc_timestamp = np.full_like(
+        mppc_timestamp, padding_value, dtype=np.float32
+    )
     flat_converted_mppc_timestamp = converted_mppc_timestamp.flatten()
     mppc_timestamp_flat = mppc_timestamp.flatten()
     fine_part = mppc_timestamp_flat % BIT_MASK_8
     coarse_part = mppc_timestamp_flat // BIT_MASK_8
-    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (coarse_part[~valid_mask.flatten()] % FRAME_LENGTH_8NS) * 8 + fine_part[~valid_mask.flatten()] * 0.05
+    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (
+        coarse_part[~valid_mask.flatten()] % FRAME_LENGTH_8NS
+    ) * 8 + fine_part[~valid_mask.flatten()] * 0.05
     return flat_converted_mppc_timestamp.reshape(mppc_timestamp.shape)
 
 
-def convert_pixel_timestamp_to_ns(pixel_timestamp: np.ndarray, padding_value = DEFAULT_PADDING_VALUE) -> np.ndarray:
+def convert_pixel_timestamp_to_ns(
+    pixel_timestamp: np.ndarray, padding_value=DEFAULT_PADDING_VALUE
+) -> np.ndarray:
     """Convert pixel timestamp to nanoseconds."""
     valid_mask = pixel_timestamp == padding_value
-    converted_pixel_timestamp = np.full_like(pixel_timestamp, padding_value, dtype=np.float32)
+    converted_pixel_timestamp = np.full_like(
+        pixel_timestamp, padding_value, dtype=np.float32
+    )
     flat_converted_mppc_timestamp = converted_pixel_timestamp.flatten()
     pixel_timestamp_flat = pixel_timestamp.flatten()
-    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (pixel_timestamp_flat[~valid_mask.flatten()] % FRAME_LENGTH_8NS) * 8
+    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (
+        pixel_timestamp_flat[~valid_mask.flatten()] % FRAME_LENGTH_8NS
+    ) * 8
     return flat_converted_mppc_timestamp.reshape(pixel_timestamp.shape)
+
 
 def validate_array_shapes(*arrays) -> None:
     """Validate that all arrays have the same shape."""
@@ -336,7 +350,7 @@ def convert_pixels_to_locations(
     flat_locations[flat_combined_mask] = np.stack(features, axis=1)
 
     # Handle track IDs
-    result_track_ids = np.full(pixel_ids.shape, -1, dtype=np.int64)
+    result_track_ids = np.full(pixel_ids.shape, padding_value, dtype=np.int64)
     if mc_hit_ids is not None and track_ids is not None:
         valid_mc_hits = mc_hit_ids[combined_mask]
         track_id_values = track_ids[valid_mc_hits].to_numpy()
@@ -438,7 +452,7 @@ def convert_mppc_to_locations(
     flat_locations[flat_valid_mask] = np.stack(features, axis=1)
 
     # Handle track IDs
-    result_track_ids = np.full(mppc_ids.shape, -1, dtype=np.int64)
+    result_track_ids = np.full(mppc_ids.shape, padding_value, dtype=np.int64)
     if mc_hit_ids is not None and track_ids is not None:
         flat_mc_hit_ids = mc_hit_ids.flatten()
         valid_mc_hits = flat_mc_hit_ids[flat_valid_mask]
@@ -474,6 +488,9 @@ def remap_track_ids_to_zero_indexed(
     pixel_valid_mask = (pixel_track_ids != -1) & (pixel_track_ids != padding_value)
     mppc_valid_mask = (mppc_track_ids != -1) & (mppc_track_ids != padding_value)
 
+    pixel_fake_hit_mask = pixel_track_ids == -1
+    mppc_fake_hit_mask = mppc_track_ids == -1
+
     # Find minimum track ID for each event
     pixel_mins = np.full(n_events, np.inf)
     mppc_mins = np.full(n_events, np.inf)
@@ -500,8 +517,60 @@ def remap_track_ids_to_zero_indexed(
             mppc_result[i, mppc_valid_mask[i]] -= (combined_mins[i] - 1).astype(
                 np.int64
             )
+        pixel_result[i, pixel_fake_hit_mask[i]] = -1
+        mppc_result[i, mppc_fake_hit_mask[i]] = -1
+        
 
     return pixel_result.astype(float), mppc_result.astype(float)
+
+
+def remap_hit_times_to_zero_starting(
+    pixel_hit_times: np.ndarray,
+    mppc_hit_times: np.ndarray,
+    padding_value: int = DEFAULT_PADDING_VALUE,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Remap hit times to start from 0 for each event.
+
+    Args:
+        pixel_hit_times: Pixel hit time array
+        mppc_hit_times: MPPC hit time array
+        padding_value: Value used for padding
+    Returns:
+        Tuple of remapped (pixel_hit_times, mppc_hit_times)
+    """
+    validate_array_shapes(pixel_hit_times, mppc_hit_times)
+
+    n_events, n_hits = pixel_hit_times.shape
+
+    # Create masks for valid entries
+    pixel_valid_mask = pixel_hit_times != padding_value
+    mppc_valid_mask = mppc_hit_times != padding_value
+
+    # Find minimum hit time for each event
+    pixel_mins = np.full(n_events, np.inf)
+    mppc_mins = np.full(n_events, np.inf)
+
+    for i in range(n_events):
+        if np.any(pixel_valid_mask[i]):
+            pixel_mins[i] = np.min(pixel_hit_times[i, pixel_valid_mask[i]])
+        if np.any(mppc_valid_mask[i]):
+            mppc_mins[i] = np.min(mppc_hit_times[i, mppc_valid_mask[i]])
+
+    # Use the minimum across both detector types for each event
+    combined_mins = np.minimum(pixel_mins, mppc_mins)
+    combined_mins[np.isinf(combined_mins)] = 0  # Handle events with no valid hits
+
+    # Apply offset to make hit times start from 0
+    pixel_result = pixel_hit_times.copy()
+    mppc_result = mppc_hit_times.copy()
+
+    for i in range(n_events):
+        if combined_mins[i] != np.inf:
+            pixel_result[i, pixel_valid_mask[i]] -= combined_mins[i]
+            mppc_result[i, mppc_valid_mask[i]] -= combined_mins[i]
+
+    return pixel_result, mppc_result
 
 
 def convert_root_to_numpy(
@@ -551,9 +620,8 @@ def convert_root_to_numpy(
                 event_data = file["mu3e"].arrays(library="pd", entry_stop=n_events)
             else:
                 event_data = file["mu3e"].arrays(library="pd")
-            mc_track_ids = file["mu3e_mchits"]["mc_track"].arrays(library="pd")[
-                "mc_track"
-            ]
+            mc_track_ids = file["mu3e_mchits"]["mc_track"].arrays(library="pd")["mc_track"]
+            mc_hit_truth_time = file["mu3e_mchits"]["time"].arrays(library="pd")["time"]
             mc_track_truth = (
                 file["mu3e_mc_tracks"].arrays(library="pd").set_index("mother")
             )
@@ -568,7 +636,15 @@ def convert_root_to_numpy(
         mc_track_truth = mc_track_truth[["px", "py", "pz", "e", "pdg"]]
 
         # Convert awkward arrays to numpy
-        data_arrays = load_awkward_to_numpy(
+        (
+            pixel_ids,
+            pixel_timestamps,
+            mppc_ids,
+            mppc_cols,
+            mppc_times,
+            pixel_mc_hits,
+            mppc_mc_hits,
+        ) = load_awkward_to_numpy(
             [
                 event_data["hit_pixelid"],
                 event_data["hit_timestamp"],
@@ -581,17 +657,6 @@ def convert_root_to_numpy(
             max_length=hit_cutoff,
             fill_value=padding_value,
         )
-
-        (
-            pixel_ids,
-            pixel_timestamps,
-            mppc_ids,
-            mppc_cols,
-            mppc_times,
-            pixel_mc_hits,
-            mppc_mc_hits,
-        ) = data_arrays
-
         # Convert IDs to spatial positions
         pixel_locations, pixel_track_ids = convert_pixels_to_locations(
             pixel_ids,
@@ -612,7 +677,9 @@ def convert_root_to_numpy(
             add_layer_feature=add_layer_feature,
         )
         # Convert timestamps to nanoseconds
-        pixel_timestamps = convert_pixel_timestamp_to_ns(pixel_timestamps, padding_value)
+        pixel_timestamps = convert_pixel_timestamp_to_ns(
+            pixel_timestamps, padding_value
+        )
         mppc_times = convert_mppc_timestamp_to_ns(mppc_times, padding_value)
 
         # Mask timestamps for invalid positions
@@ -620,19 +687,6 @@ def convert_root_to_numpy(
         mppc_invalid_mask = np.all(mppc_locations == padding_value, axis=-1)
         pixel_timestamps[pixel_invalid_mask] = padding_value
         mppc_times[mppc_invalid_mask] = padding_value
-
-        # Remap track IDs to start from 0
-        pixel_track_ids, mppc_track_ids = remap_track_ids_to_zero_indexed(
-            pixel_track_ids, mppc_track_ids, padding_value
-        )
-
-        # Create spacetime arrays
-        pixel_spacetime = np.concatenate(
-            [pixel_locations, pixel_timestamps[..., None]], axis=-1
-        )
-        mppc_spacetime = np.concatenate(
-            [mppc_locations, mppc_times[..., None]], axis=-1
-        )
 
         # Create track truth arrays
         def create_track_truth(mc_hit_ids, track_ids_array, data_shape):
@@ -650,6 +704,19 @@ def convert_root_to_numpy(
 
             return track_truth
 
+        def get_hit_time_truth(mc_hit_ids, hit_times_series, data_shape):
+            timing_truth = np.full((*data_shape,), padding_value, dtype=np.float64)
+            flat_truth = timing_truth.reshape(-1)
+            valid_mask = (mc_hit_ids.flatten() != padding_value) & (
+                mc_hit_ids.flatten() != -1
+            )
+            if np.any(valid_mask):
+                truth_times = hit_times_series.iloc[
+                    mc_hit_ids.flatten()[valid_mask]
+                ].to_numpy()
+                flat_truth[valid_mask] = truth_times
+            return timing_truth
+
         pixel_track_truth = create_track_truth(
             pixel_mc_hits, mc_track_ids, pixel_ids.shape
         )
@@ -657,12 +724,42 @@ def convert_root_to_numpy(
             mppc_mc_hits, mc_track_ids, mppc_ids.shape
         )
 
+        pixel_timing_truth = get_hit_time_truth(
+            pixel_mc_hits, mc_hit_truth_time, pixel_mc_hits.shape
+        )
+        mppc_timing_truth = get_hit_time_truth(
+            mppc_mc_hits, mc_hit_truth_time, mppc_mc_hits.shape
+        )
+        # Remap track IDs to start from 0
+        pixel_track_ids, mppc_track_ids = remap_track_ids_to_zero_indexed(
+            pixel_track_ids, mppc_track_ids, padding_value
+        )
+
+        # Remap hit times to start from 0
+        pixel_timing_truth, mppc_timing_truth = remap_hit_times_to_zero_starting(
+            pixel_timing_truth, mppc_timing_truth, padding_value
+        )
+
+        # Create spacetime arrays
+        pixel_spacetime = np.concatenate(
+            [pixel_locations, pixel_timestamps[..., None]], axis=-1
+        )
+        mppc_spacetime = np.concatenate(
+            [mppc_locations, mppc_times[..., None]], axis=-1
+        )
+
         # Combine track IDs and truth
         pixel_track_labels = np.concatenate(
-            [pixel_track_ids[..., None], pixel_track_truth], axis=-1
+            [
+                pixel_track_ids[..., None],
+                pixel_timing_truth[..., None],
+                pixel_track_truth,
+            ],
+            axis=-1,
         )
         mppc_track_labels = np.concatenate(
-            [mppc_track_ids[..., None], mppc_track_truth], axis=-1
+            [mppc_track_ids[..., None], mppc_timing_truth[..., None], mppc_track_truth],
+            axis=-1,
         )
 
         # Filter events with valid hits
