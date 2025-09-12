@@ -42,7 +42,7 @@ def convert_mppc_timestamp_to_ns(
     mppc_timestamp: np.ndarray, padding_value=DEFAULT_PADDING_VALUE
 ) -> np.ndarray:
     """Convert MPPC timestamp to nanoseconds."""
-    valid_mask = mppc_timestamp == padding_value
+    valid_mask = mppc_timestamp != padding_value
     converted_mppc_timestamp = np.full_like(
         mppc_timestamp, padding_value, dtype=np.float32
     )
@@ -50,9 +50,9 @@ def convert_mppc_timestamp_to_ns(
     mppc_timestamp_flat = mppc_timestamp.flatten()
     fine_part = mppc_timestamp_flat % BIT_MASK_8
     coarse_part = mppc_timestamp_flat // BIT_MASK_8
-    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (
-        coarse_part[~valid_mask.flatten()] % FRAME_LENGTH_8NS
-    ) * 8 + fine_part[~valid_mask.flatten()] * 0.05
+    flat_converted_mppc_timestamp[valid_mask.flatten()] = (
+        coarse_part[valid_mask.flatten()] % FRAME_LENGTH_8NS
+    ) * 8 + fine_part[valid_mask.flatten()] * 0.05
     return flat_converted_mppc_timestamp.reshape(mppc_timestamp.shape)
 
 
@@ -60,16 +60,16 @@ def convert_pixel_timestamp_to_ns(
     pixel_timestamp: np.ndarray, padding_value=DEFAULT_PADDING_VALUE
 ) -> np.ndarray:
     """Convert pixel timestamp to nanoseconds."""
-    valid_mask = pixel_timestamp == padding_value
+    valid_mask = pixel_timestamp != padding_value
     converted_pixel_timestamp = np.full_like(
         pixel_timestamp, padding_value, dtype=np.float32
     )
-    flat_converted_mppc_timestamp = converted_pixel_timestamp.flatten()
+    flat_converted_pixel_timestamp = converted_pixel_timestamp.flatten()
     pixel_timestamp_flat = pixel_timestamp.flatten()
-    flat_converted_mppc_timestamp[~valid_mask.flatten()] = (
-        pixel_timestamp_flat[~valid_mask.flatten()] % FRAME_LENGTH_8NS
+    flat_converted_pixel_timestamp[valid_mask.flatten()] = (
+        pixel_timestamp_flat[valid_mask.flatten()] % FRAME_LENGTH_8NS
     ) * 8
-    return flat_converted_mppc_timestamp.reshape(pixel_timestamp.shape)
+    return flat_converted_pixel_timestamp.reshape(pixel_timestamp.shape)
 
 
 def validate_array_shapes(*arrays) -> None:
@@ -85,86 +85,6 @@ def validate_array_shapes(*arrays) -> None:
             )
 
 
-def reorder_array_by_validity(
-    data: np.ndarray, padding_value: int = DEFAULT_PADDING_VALUE
-) -> np.ndarray:
-    """
-    Reorder array to ensure non-padded entries come first.
-
-    Args:
-        data: Input array (2D or 3D)
-        padding_value: Value used for padding
-
-    Returns:
-        Reordered array with valid entries first
-    """
-    if data.size == 0:
-        return data
-
-    if data.ndim == 3:
-        valid_mask = data[:, :, 0] != padding_value
-    elif data.ndim == 2:
-        valid_mask = data != padding_value
-    else:
-        raise DataProcessingError(
-            f"Unsupported array dimensions: {data.ndim}. Expected 2D or 3D."
-        )
-
-    batch_size = data.shape[0]
-    result = np.full_like(data, padding_value)
-
-    for i in range(batch_size):
-        valid_indices = np.where(valid_mask[i])[0]
-        if len(valid_indices) > 0:
-            result[i, : len(valid_indices)] = data[i, valid_indices]
-
-    return result
-
-
-def sort_by_feature(
-    data: np.ndarray, feature: np.ndarray, padding_value: int = DEFAULT_PADDING_VALUE
-) -> np.ndarray:
-    """
-    Sort data along axis 1 by feature values, preserving padding structure.
-
-    Args:
-        data: Data array to sort
-        feature: Feature array to sort by
-        padding_value: Value used for padding
-
-    Returns:
-        Sorted data array
-    """
-    validate_array_shapes(data[:, :, 0] if data.ndim == 3 else data, feature)
-
-    # Create validity mask
-    if data.ndim == 3:
-        valid_mask = (data != padding_value).any(axis=-1)
-    elif data.ndim == 2:
-        valid_mask = data != padding_value
-    else:
-        raise DataProcessingError(f"Unsupported data dimensions: {data.ndim}")
-
-    # Sort indices, putting invalid entries at the end
-    sort_indices = np.argsort(np.where(valid_mask, feature, np.inf), axis=1)
-
-    # Apply sorting
-    if data.ndim == 3:
-        sorted_data = np.take_along_axis(data, sort_indices[:, :, None], axis=1)
-    else:
-        sorted_data = np.take_along_axis(data, sort_indices, axis=1)
-
-    # Ensure invalid entries remain invalid
-    result = np.full_like(data, padding_value)
-    num_valid = valid_mask.sum(axis=1)
-
-    for i, n_valid in enumerate(num_valid):
-        if n_valid > 0:
-            result[i, :n_valid] = sorted_data[i, :n_valid]
-
-    return result
-
-
 def load_awkward_to_numpy(
     series_list: List[pd.Series],
     max_length: int = DEFAULT_HIT_CUTOFF,
@@ -175,11 +95,11 @@ def load_awkward_to_numpy(
 
     Args:
         series_list: List of pandas Series containing awkward arrays
-        max_length: Maximum sequence length (longer sequences are clipped)
+        max_length: Maximum sequence length (longer sequences are dropped)
         fill_value: Value used for padding
 
     Returns:
-        List of padded NumPy arrays
+        List of padded NumPy arrays, aligned across all input series
     """
     if not series_list:
         raise DataProcessingError("Empty series list provided")
@@ -187,25 +107,19 @@ def load_awkward_to_numpy(
     # Convert to awkward arrays
     ak_arrays = [ak.Array(series.to_list()) for series in series_list]
 
-    # Calculate lengths and create combined validity mask
-    lengths_list = [ak.num(ak_array) for ak_array in ak_arrays]
+    # Calculate lengths (per row)
+    lengths_list = [ak.num(ak_array, axis=1) for ak_array in ak_arrays]
+
+    # Drop rows where any sequence is empty or too long
     valid_masks = [(lengths > 0) & (lengths <= max_length) for lengths in lengths_list]
+    combined_mask = np.logical_and.reduce(valid_masks)
 
-    # Combine all validity masks
-    combined_mask = valid_masks[0]
-    for mask in valid_masks[1:]:
-        combined_mask = combined_mask & mask
-
-    # Apply mask and padding
-    filtered_arrays = [ak_array[combined_mask] for ak_array in ak_arrays]
-    padded_arrays = [
-        ak.pad_none(ak_array, max_length, clip=True) for ak_array in filtered_arrays
-    ]
-
-    # Convert to NumPy
-    numpy_arrays = [
-        ak.to_numpy(ak.fill_none(ak_array, fill_value)) for ak_array in padded_arrays
-    ]
+    # Apply mask, pad, and convert
+    numpy_arrays = []
+    for ak_array in ak_arrays:
+        filtered = ak_array[combined_mask]
+        padded = ak.pad_none(filtered, max_length, clip=True, axis=1)
+        numpy_arrays.append(ak.to_numpy(ak.fill_none(padded, fill_value)))
 
     return numpy_arrays
 
@@ -491,9 +405,11 @@ def remap_track_ids_to_zero_indexed(
     pixel_fake_hit_mask = pixel_track_ids == -1
     mppc_fake_hit_mask = mppc_track_ids == -1
 
+    maximum_track_id = max(np.max(pixel_track_ids), np.max(mppc_track_ids)) + 1
+
     # Find minimum track ID for each event
-    pixel_mins = np.full(n_events, np.inf)
-    mppc_mins = np.full(n_events, np.inf)
+    pixel_mins = np.full(n_events, maximum_track_id, dtype=np.int64)
+    mppc_mins = np.full(n_events, maximum_track_id, dtype=np.int64)
 
     for i in range(n_events):
         if np.any(pixel_valid_mask[i]):
@@ -503,7 +419,9 @@ def remap_track_ids_to_zero_indexed(
 
     # Use the minimum across both detector types for each event
     combined_mins = np.minimum(pixel_mins, mppc_mins)
-    combined_mins[np.isinf(combined_mins)] = 0  # Handle events with no valid tracks
+    combined_mins[combined_mins == maximum_track_id] = (
+        0  # Handle events with no valid tracks
+    )
 
     # Apply offset to make track IDs start from 0
     pixel_result = pixel_track_ids.copy()
@@ -511,15 +429,10 @@ def remap_track_ids_to_zero_indexed(
 
     for i in range(n_events):
         if combined_mins[i] != np.inf:
-            pixel_result[i, pixel_valid_mask[i]] -= (combined_mins[i] - 1).astype(
-                np.int64
-            )
-            mppc_result[i, mppc_valid_mask[i]] -= (combined_mins[i] - 1).astype(
-                np.int64
-            )
+            pixel_result[i, pixel_valid_mask[i]] -= (combined_mins[i]).astype(np.int64)
+            mppc_result[i, mppc_valid_mask[i]] -= (combined_mins[i]).astype(np.int64)
         pixel_result[i, pixel_fake_hit_mask[i]] = -1
         mppc_result[i, mppc_fake_hit_mask[i]] = -1
-        
 
     return pixel_result.astype(float), mppc_result.astype(float)
 
@@ -548,8 +461,8 @@ def remap_hit_times_to_zero_starting(
     mppc_valid_mask = mppc_hit_times != padding_value
 
     # Find minimum hit time for each event
-    pixel_mins = np.full(n_events, np.inf)
-    mppc_mins = np.full(n_events, np.inf)
+    pixel_mins = np.full(n_events, np.inf, dtype=pixel_hit_times.dtype)
+    mppc_mins = np.full(n_events, np.inf, dtype=mppc_hit_times.dtype)
 
     for i in range(n_events):
         if np.any(pixel_valid_mask[i]):
@@ -571,6 +484,36 @@ def remap_hit_times_to_zero_starting(
             mppc_result[i, mppc_valid_mask[i]] -= combined_mins[i]
 
     return pixel_result, mppc_result
+
+def create_track_truth(track_ids_array, mc_track_truth, data_shape, padding_value=DEFAULT_PADDING_VALUE):
+    track_truth = np.full((*data_shape, 5), padding_value, dtype=np.float32)
+    flat_truth = track_truth.reshape(-1, 5)
+    valid_mask = (track_ids_array.flatten() != padding_value) & (
+        track_ids_array.flatten() != -1
+    )
+
+    if np.any(valid_mask):
+        valid_track_ids = track_ids_array.flatten()[valid_mask]
+
+        # Lookup rows in mc_track_truth by track id
+        truth_data = mc_track_truth.loc[valid_track_ids].to_numpy(
+            dtype=np.float32
+        )
+
+        # Fill in flat_truth at valid_mask positions
+        flat_truth[valid_mask] = truth_data
+    return track_truth
+
+def get_hit_time_truth(mc_hit_ids, hit_times_series, data_shape, padding_value=DEFAULT_PADDING_VALUE):
+    timing_truth = np.full((*data_shape,), padding_value, dtype=np.float64)
+    flat_truth = timing_truth.reshape(-1)
+    valid_mask = (mc_hit_ids.flatten() != padding_value)
+    if np.any(valid_mask):
+        truth_times = hit_times_series.loc[
+            mc_hit_ids.flatten()[valid_mask]
+        ].to_numpy()
+        flat_truth[valid_mask] = truth_times
+    return timing_truth
 
 
 def convert_root_to_numpy(
@@ -620,10 +563,19 @@ def convert_root_to_numpy(
                 event_data = file["mu3e"].arrays(library="pd", entry_stop=n_events)
             else:
                 event_data = file["mu3e"].arrays(library="pd")
-            mc_track_ids = file["mu3e_mchits"]["mc_track"].arrays(library="pd")["mc_track"]
+            mc_track_ids = file["mu3e_mchits"]["mc_track"].arrays(library="pd")[
+                "mc_track"
+            ]
             mc_hit_truth_time = file["mu3e_mchits"]["time"].arrays(library="pd")["time"]
-            mc_track_truth = (
-                file["mu3e_mc_tracks"].arrays(library="pd").set_index("mother")
+            mc_track_truth = file["mu3e_mc_tracks"].arrays(library="pd")
+
+        mc_track_ids[mc_track_ids != -1] = (
+            mc_track_truth["mother"].loc[mc_track_ids[mc_track_ids != -1]].values
+        )
+
+        if mc_track_ids.isnull().any():
+            raise DataProcessingError(
+                "Some mc_track_ids do not have corresponding entries in mc_track_truth"
             )
 
         # Validate loaded data
@@ -641,7 +593,7 @@ def convert_root_to_numpy(
             pixel_timestamps,
             mppc_ids,
             mppc_cols,
-            mppc_times,
+            mppc_timestamp,
             pixel_mc_hits,
             mppc_mc_hits,
         ) = load_awkward_to_numpy(
@@ -676,59 +628,43 @@ def convert_root_to_numpy(
             padding_value,
             add_layer_feature=add_layer_feature,
         )
+        del (
+            mppc_cols,
+            sensor_positions,
+            mppc_positions,
+            fibre_positions,
+            event_data,
+            mc_track_ids,
+        )
         # Convert timestamps to nanoseconds
         pixel_timestamps = convert_pixel_timestamp_to_ns(
             pixel_timestamps, padding_value
         )
-        mppc_times = convert_mppc_timestamp_to_ns(mppc_times, padding_value)
+        mppc_timestamp = convert_mppc_timestamp_to_ns(mppc_timestamp, padding_value)
 
         # Mask timestamps for invalid positions
         pixel_invalid_mask = np.all(pixel_locations == padding_value, axis=-1)
         mppc_invalid_mask = np.all(mppc_locations == padding_value, axis=-1)
         pixel_timestamps[pixel_invalid_mask] = padding_value
-        mppc_times[mppc_invalid_mask] = padding_value
+        mppc_timestamp[mppc_invalid_mask] = padding_value
+        pixel_mc_hits[pixel_invalid_mask] = padding_value
+        mppc_mc_hits[mppc_invalid_mask] = padding_value
+
+        del pixel_invalid_mask, mppc_invalid_mask
 
         # Create track truth arrays
-        def create_track_truth(mc_hit_ids, track_ids_array, data_shape):
-            track_truth = np.full((*data_shape, 5), padding_value, dtype=np.float32)
-            flat_truth = track_truth.reshape(-1, 5)
-            valid_mask = (mc_hit_ids.flatten() != padding_value) & (
-                mc_hit_ids.flatten() != -1
-            )
-
-            if np.any(valid_mask):
-                truth_data = mc_track_truth.iloc[
-                    track_ids_array[mc_hit_ids.flatten()[valid_mask]]
-                ].to_numpy()
-                flat_truth[valid_mask] = truth_data
-
-            return track_truth
-
-        def get_hit_time_truth(mc_hit_ids, hit_times_series, data_shape):
-            timing_truth = np.full((*data_shape,), padding_value, dtype=np.float64)
-            flat_truth = timing_truth.reshape(-1)
-            valid_mask = (mc_hit_ids.flatten() != padding_value) & (
-                mc_hit_ids.flatten() != -1
-            )
-            if np.any(valid_mask):
-                truth_times = hit_times_series.iloc[
-                    mc_hit_ids.flatten()[valid_mask]
-                ].to_numpy()
-                flat_truth[valid_mask] = truth_times
-            return timing_truth
-
         pixel_track_truth = create_track_truth(
-            pixel_mc_hits, mc_track_ids, pixel_ids.shape
+            pixel_track_ids, mc_track_truth, pixel_ids.shape
         )
         mppc_track_truth = create_track_truth(
-            mppc_mc_hits, mc_track_ids, mppc_ids.shape
+            mppc_track_ids, mc_track_truth, mppc_ids.shape
         )
 
         pixel_timing_truth = get_hit_time_truth(
-            pixel_mc_hits, mc_hit_truth_time, pixel_mc_hits.shape
+            pixel_mc_hits, mc_hit_truth_time, pixel_mc_hits.shape, padding_value
         )
         mppc_timing_truth = get_hit_time_truth(
-            mppc_mc_hits, mc_hit_truth_time, mppc_mc_hits.shape
+            mppc_mc_hits, mc_hit_truth_time, mppc_mc_hits.shape, padding_value
         )
         # Remap track IDs to start from 0
         pixel_track_ids, mppc_track_ids = remap_track_ids_to_zero_indexed(
@@ -740,13 +676,19 @@ def convert_root_to_numpy(
             pixel_timing_truth, mppc_timing_truth, padding_value
         )
 
+
+        del pixel_mc_hits, mppc_mc_hits
+
         # Create spacetime arrays
         pixel_spacetime = np.concatenate(
             [pixel_locations, pixel_timestamps[..., None]], axis=-1
         )
         mppc_spacetime = np.concatenate(
-            [mppc_locations, mppc_times[..., None]], axis=-1
+            [mppc_locations, mppc_timestamp[..., None]], axis=-1
         )
+
+        del pixel_locations, mppc_locations
+        del pixel_timestamps, mppc_timestamp
 
         # Combine track IDs and truth
         pixel_track_labels = np.concatenate(
@@ -762,6 +704,10 @@ def convert_root_to_numpy(
             axis=-1,
         )
 
+        del pixel_track_ids, mppc_track_ids
+        del pixel_track_truth, mppc_track_truth
+        del pixel_timing_truth, mppc_timing_truth
+
         # Filter events with valid hits
         pixel_hit_counts = (pixel_spacetime != padding_value).any(axis=-1).sum(axis=-1)
         mppc_hit_counts = (mppc_spacetime != padding_value).any(axis=-1).sum(axis=-1)
@@ -772,6 +718,7 @@ def convert_root_to_numpy(
         mppc_spacetime = mppc_spacetime[valid_events]
         pixel_track_labels = pixel_track_labels[valid_events]
         mppc_track_labels = mppc_track_labels[valid_events]
+
 
         # Save results
         file_paths = {

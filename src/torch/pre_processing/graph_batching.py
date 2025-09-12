@@ -34,6 +34,7 @@ class DetectorData:
     tracks: torch.Tensor
     times: torch.Tensor
     track_truth: Optional[torch.Tensor] = None  # [px, py, pz, e, pdg]
+    truth_time: Optional[torch.Tensor] = None  # Optional truth time for MPPC
 
     def __len__(self) -> int:
         return self.positions.size(0)
@@ -48,6 +49,9 @@ class DetectorData:
             times=self.times[mask],
             track_truth=(
                 self.track_truth[mask] if self.track_truth is not None else None
+            ),
+            truth_time=(
+                self.truth_time[mask] if self.truth_time is not None else None
             ),
         )
 
@@ -65,7 +69,7 @@ class EventData:
     )  # [n_hits, n_features] where features are [x,y,z,(layer),time]
     track_labels: (
         torch.Tensor
-    )  # [n_hits, 6] where features are [track_id, px, py, pz, e, pdg]
+    )  # [n_hits, 7] where features are [track_id, truth_time, px, py, pz, e, pdg]
     has_layer_feature: bool = False
 
     def to_detector_data(self) -> DetectorData:
@@ -90,7 +94,7 @@ class EventData:
         # Extract track information
         tracks = self.track_labels[:, 0]  # First column is track_id
         track_truth = self.track_labels[
-            :, 1:
+            :, 2:
         ]  # Remaining columns are [px, py, pz, e, pdg]
 
         return DetectorData(
@@ -99,6 +103,7 @@ class EventData:
             tracks=tracks,
             times=times,
             track_truth=track_truth,
+            truth_time=self.track_labels[:, 1],  # truth_time
         )
 
 
@@ -281,8 +286,13 @@ class GraphBuilderBase(ABC):
         dst_tracks: torch.Tensor,
         row: torch.Tensor,
         col: torch.Tensor,
+        truth_time: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Create edge labels based on track matching."""
+        if truth_time is not None:
+            # For MPPC to MPPC edges, use truth time proximity for labeling
+            time_diff = (truth_time[row] - truth_time[col])
+            return ((src_tracks[row] > 0) & (src_tracks[row] == dst_tracks[col]) & (time_diff > 0)).float()
         return ((src_tracks[row] > 0) & (src_tracks[row] == dst_tracks[col])).float()
 
     @abstractmethod
@@ -425,7 +435,7 @@ class HeteroGraphBuilder(GraphBuilderBase):
             return None, None
 
         edge_labels = self._create_edge_labels(
-            src_data.tracks, dst_data.tracks, row, col
+            src_data.tracks, dst_data.tracks, row, col, src_data.truth_time
         )
         return torch.stack([row, col], dim=0), edge_labels
 
@@ -693,7 +703,7 @@ class LayerSeparatedHeteroGraphBuilder(GraphBuilderBase):
             return None, None
 
         edge_labels = self._create_edge_labels(
-            src_data.tracks, dst_data.tracks, row, col
+            src_data.tracks, dst_data.tracks, row, col, src_data.truth_time
         )
         return torch.stack([row, col], dim=0), edge_labels
 
