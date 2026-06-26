@@ -16,17 +16,17 @@ def create_cnn_matrix_dataset(beam_arr, cosmic_arr, cosmic_mix_fraction=0.5, max
 
     mix_mask = np.random.rand(num_beam_events) < cosmic_mix_fraction
     cosmic_indices_pool = list(np.random.permutation(num_cosmic_events))
-    maxing = True
+    mixing = True
 
     for i in range(num_beam_events):
         beam_event = beam_arr[i]
         valid_beam = beam_event[beam_event[:, 0] != -999.0]
         if not use_time: valid_beam = valid_beam[:,:3]
 
-        if mix_mask[i] and maxing:
+        if mix_mask[i] and mixing:
             if len(cosmic_indices_pool) == 0:
                 print(f"Warning: Out of unique cosmic events at beam index {i}. Stopping mix allocation.")
-                maxing = False
+                mixing = False
                 continue
 
             rand_cos_idx = cosmic_indices_pool.pop()
