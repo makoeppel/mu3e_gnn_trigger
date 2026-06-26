@@ -1,0 +1,17 @@
+{
+    "detector": {
+        "phase": 0,
+        "pixels": {
+            "large": {
+                "nLayers": 1,
+                "thickness" : 0.07
+            },
+            "small": {
+                "thickness" : 0.07
+            }
+        },
+        "tiles" : {
+            "nLayers" : 2
+        }
+    }
+}

@@ -1,0 +1,10 @@
+{
+    "#description" : "3L70um, 256ns, beam6e7",
+    ".include": "_3L70um.json",
+    "digi" : {
+        "frameLength" : 256,
+        "generators" : [
+            { "type" : "beam", "particle" : "mu+/eee", "#" : "signal decay" }
+        ]
+    }
+}

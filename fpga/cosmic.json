@@ -1,0 +1,16 @@
+{
+    ".include": "bvr2026/_3L70um.json",
+    "digi" : {
+      "#frameLength" : 256,
+      "cosmic" : {
+        "xmin" : -200,
+        "xmax" : 200,
+        "zmin" : -200,
+        "zmax" : 200
+      },
+  
+      "generators" : [
+        { "type" : "cosmic", "ratePerFrame" : 1, "#" : "rate per m^2" }
+      ]
+    }
+}
